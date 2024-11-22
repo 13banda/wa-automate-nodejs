@@ -21,14 +21,22 @@ export const isAuthenticated = (waPage: Page): Promise<unknown> => race(needsToS
 export const needsToScan = (waPage: Page): Observable<unknown> => {
   return from(new Promise(async resolve => {
     try {
-      await Promise.race([
-        waPage.waitForFunction('checkQrRefresh()', { timeout: 0, polling: 1000 }).catch(() => { }),
-        await waPage
-          .waitForSelector('body > div > div > .landing-wrapper', {
-            timeout: 0
-          }).catch(() => resolve(true))
-      ]).catch(() => { })
-      await waPage.waitForSelector("canvas[aria-label='Scan me!']", { timeout: 0 }).catch(() => { })
+      /**
+       * TODO: COMMENTING OUT THE BELOW LINES MAY CAUSE A REGRESSION IN RELOGIN? REVERT IF NEEDED.
+       */
+      // const raceResult = await Promise.race([
+      //   waPage.waitForFunction('checkQrRefresh()', { timeout: 0, polling: 1000 }).catch(() => { }),
+      //   await waPage
+      //     .waitForSelector('body > div > div > .landing-wrapper', {
+      //       timeout: 0
+      //     }).catch(() => resolve(true))
+      // ]).catch(() => { })
+      // console.log("🚀 ~ needsToScan ~ raceResult:", raceResult)
+      const elementResult = await Promise.race([
+        waPage.waitForSelector("canvas[aria-label='Scan this QR code to link a device!']", { timeout: 0 }).catch(() => { }),
+        waPage.waitForSelector("canvas[aria-label]", { timeout: 0 }).catch(() => { })
+      ])
+      log.info("🚀 ~ needsToScan ~ elementResult:", elementResult)
       resolve(false)
     } catch (error) {
       console.log("needsToScan -> error", error)
@@ -59,10 +67,10 @@ const isTosBlocked  = (waPage: Page): Observable<string | boolean> => {
   );
 };
 
-export const waitForRipeSession = async (waPage: Page): Promise<boolean> => {
+export const waitForRipeSession = async (waPage: Page, waitForRipeSessionTimeout ?: number): Promise<boolean> => {
   try {
     await waPage.waitForFunction(`window.isRipeSession()`,
-      { timeout: 0, polling: 'mutation' });
+      { timeout: (waitForRipeSessionTimeout ?? 5) * 1000, polling: 1000 });
     return true;
   } catch (error) {
     return false;
@@ -105,7 +113,7 @@ export class QRManager {
   config: ConfigObject = null;
   firstEmitted = false;
   _internalQrPngLoaded = false;
-  qrCheck = `document.querySelector("canvas[aria-label='Scan me!']")?document.querySelector("canvas[aria-label='Scan me!']").parentElement.getAttribute("data-ref"):false`
+  qrCheck = `document.querySelector("canvas[aria-label]")?document.querySelector("canvas[aria-label]").parentElement.getAttribute("data-ref"):false`
 
   constructor(config = null) {
     this.config = config;
@@ -124,6 +132,7 @@ export class QRManager {
   }
 
   async grabAndEmit(qrData, waPage: Page, config: ConfigObject, spinner: Spin) {
+    const isLinkCode = qrData.length === 9
     this.qrNum++;
     if (config.qrMax && this.qrNum > config.qrMax) {
       spinner.info('QR Code limit reached, exiting...');
@@ -134,9 +143,13 @@ export class QRManager {
     if (qrData) {
       qrEv.emit(qrData, `qrData`);
       if (!config.qrLogSkip) {
-        qrcode.generate(qrData, { small: true }, terminalQrCode => {
-          console.log(boxen(terminalQrCode, {title: config.sessionId, padding: 1, titleAlignment: 'center'}));
-        });
+        if(isLinkCode) {
+          console.log(boxen(qrData, {title: `ENTER THIS CODE ON THE HOST ACCOUNT DEVICE: ${config.sessionId}`, padding: 1, titleAlignment: 'center'}));
+        } else {
+          qrcode.generate(qrData, { small: true }, terminalQrCode => {
+            console.log(boxen(terminalQrCode, {title: config.sessionId, padding: 1, titleAlignment: 'center'}));
+          });
+      }
       }
       else {
         console.log(`New QR Code generated. Not printing in console because qrLogSkip is set to true`)
@@ -150,7 +163,7 @@ export class QRManager {
       this._internalQrPngLoaded = true;
     }
     try {
-      const qrPng = await waPage.evaluate(`window.getQrPng()`);
+      const qrPng = isLinkCode ? qrData : await waPage.evaluate(`window.getQrPng()`);
       if (qrPng) {
         qrEv.emit(qrPng);
         processSend('ready');
@@ -168,6 +181,7 @@ export class QRManager {
             }
             this.hash = data;
           }).catch(e => {
+            console.error(e)
             this.hash = 'START';
           })
         }
@@ -181,6 +195,29 @@ export class QRManager {
       log.info('smartQr -> error', { lr })
       spinner.info(`Something went wrong while retreiving new the QR code but it should not affect the session launch procedure: ${error.message}`);
     }
+  }
+
+  async linkCode(waPage: Page, config?: ConfigObject, spinner?: Spin): Promise<boolean | void | string> {
+    const evalResult = await waPage.evaluate("window.Store && window.Store.State")
+    if (evalResult === false) {
+      console.log('Seems as though you have been TOS_BLOCKed, unable to refresh QR Code. Please see https://github.com/open-wa/wa-automate-nodejs#best-practice for information on how to prevent this from happeing. You will most likely not get a QR Code');
+      log.warn('Seems as though you have been TOS_BLOCKed, unable to refresh QR Code. Please see https://github.com/open-wa/wa-automate-nodejs#best-practice for information on how to prevent this from happeing. You will most likely not get a QR Code');
+      if (config.throwErrorOnTosBlock) throw new Error('TOSBLOCK');
+    }
+
+    const isAuthed = await isAuthenticated(waPage);
+    if (isAuthed) return true;
+
+    const _hasDefaultStateYet = await waPage.evaluate("!!(window.Store &&  window.Store.State && window.Store.State.Socket)")
+    if (!_hasDefaultStateYet) {
+      //expecting issue, take a screenshot then wait a few seconds before continuing
+      await timeout(2000);
+    }
+    spinner.info('Link Code requested, please use the link code to login from your host account device')
+    const linkCode = await waPage.evaluate((number)=> window['linkCode'](number), config?.linkCode)
+    spinner?.succeed(`Link Code please use this to login from your host account device: ${linkCode}`)
+    await this.grabAndEmit(linkCode, waPage, config, spinner)
+    return await isInsideChat(waPage).toPromise()
   }
 
   async smartQr(waPage: Page, config?: ConfigObject, spinner?: Spin): Promise<boolean | void | string> {
@@ -213,7 +250,7 @@ export class QRManager {
         }
         if (!gotResult && (qrData === 'QR_CODE_SUCCESS' || qrData === md)) {
           gotResult = true;
-          spinner?.succeed(qrData === md ? "Multi device support for this project is EXPERIMENTAL. Some things may not work...." : "QR code scanned. Loading session...")
+          spinner?.succeed("QR code scanned. Loading session...")
           return resolve(await isInsideChat(waPage).toPromise())
         }
         if (!gotResult) this.grabAndEmit(qrData, waPage, config, spinner);
@@ -244,6 +281,9 @@ export class QRManager {
    * If it doesn't show up within 10 seconds then assume the session is authed already or blocked therefore ignore and return promise
    */
   async waitFirstQr(waPage: Page, config?: ConfigObject, spinner?: Spin){
+    /**
+     * Check if session is authed already
+     */
     const fqr = await waPage.waitForFunction(`!!(${this.qrCheck})`, {
       polling: 500,
       timeout: 10000

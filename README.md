@@ -1,3 +1,6 @@
+> [!WARNING]  
+> By visiting this page you [explicitly agree to the Terms of Service (read here)](https://github.com/open-wa/wa-automate-nodejs/blob/master/tos.md)
+
 <div align="center">
 <img src="https://raw.githubusercontent.com/open-wa/wa-automate-nodejs/master/resources/hotfix-logo.png" width="128" height="128"/>
 
@@ -7,6 +10,8 @@
 >
 >
 
+[![Ceasefire Now](https://badge.techforpalestine.org/ceasefire-now)](https://techforpalestine.org/learn-more)
+
 [![npm version](https://img.shields.io/npm/v/@open-wa/wa-automate.svg?color=green)](https://www.npmjs.com/package/@open-wa/wa-automate)
 ![node](https://img.shields.io/node/v/@open-wa/wa-automate)
 [![Downloads](https://img.shields.io/npm/dm/@open-wa/wa-automate.svg)](https://www.npmjs.com/package/@open-wa/wa-automate)
@@ -15,16 +20,16 @@
 
 <a href="https://discord.gg/dnpp72a"><img src="https://img.shields.io/discord/661438166758195211?color=blueviolet&label=discord&style=flat" /></a> ![WhatsApp_Web 2.2147.16](https://img.shields.io/badge/WhatsApp_Web-2.2147.16-brightgreen.svg)<img alt="Twitter Follow" src="https://img.shields.io/twitter/follow/openwadev?label=Follow%20%40openwadev%20for%20updates&logo=twitter&style=social"/>
 
-<a href="https://cloud.digitalocean.com/apps/new?repo=https://github.com/open-wa/wa-automate-nodejs/tree/deploy&refcode=4b093f6ecd3a&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge">
+<a href="https://cloud.digitalocean.com/apps/new?repo=https%3A%2F%2Fgithub.com%2Fopen-wa%2Fwa-automate-docker%2Ftree%2Fmaster&refcode%3D4b093f6ecd3a&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge">
  <img style="max-height:200px" src="https://raw.githubusercontent.com/open-wa/wa-automate-deploy-heroku/main/assets/do_deploy.png" alt="Deploy to DO"/>
 </a>
 
 
 <p align="center">
   <a href="#functions-list">Key Features</a> •
-  <a href="https://docs.openwa.dev/pages/Getting%20Started/installation.html">Getting Started</a> •
-  <a href="https://docs.openwa.dev/pages/Getting%20Started/quick-run.html">Easy API</a> •
-  <a href="https://docs.openwa.dev/classes/api_Client.Client.html">Documentation</a> •
+  <a href="https://docs.openwa.dev/docs/get-started/installation">Getting Started</a> •
+  <a href="https://docs.openwa.dev/docs/get-started/quick-run">Easy API</a> •
+  <a href="https://docs.openwa.dev/docs/api/classes/api_Client.Client">Documentation</a> •
   <a href="https://openwa.page.link/key">Get a License Key</a> •
   <a href="#support">Support</a>
 </p>

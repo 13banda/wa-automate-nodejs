@@ -10,7 +10,9 @@ jobs:
     - name: Install emojis
       run: sudo apt install fonts-noto-color-emoji
     - name: Update NPM
-      run: sudo npm install -g npm@latest
+      run: sudo npm install -g npm@10.1.0
+    - name: Set npm token
+      run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
     - uses: actions/checkout@v2
       with:
         # 0 indicates all history
@@ -22,3 +24,5 @@ jobs:
       env:
         NPM_TOKEN: ${{secrets.NPM_TOKEN}}
         GITHUB_TOKEN: ${{ secrets.CUSTOM_GH_TOKEN }}
+        GIT_USER: smashah
+        GIT_PASS: ${{ secrets.CUSTOM_GH_TOKEN }}

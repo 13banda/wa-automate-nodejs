@@ -1,10 +1,10 @@
 import { default as mime } from 'mime-types';
-import { Page, EvaluateFunc, PageEventObject } from 'puppeteer';
+import { Page, EvaluateFunc, PageEvent } from 'puppeteer';
 import { Chat, LiveLocationChangedEvent, ChatState, ChatMuteDuration, GroupChatCreationResponse, EphemeralDuration } from './model/chat';
-import { Contact, NumberCheck } from './model/contact';
-import { Message, MessageInfo } from './model/message';
+import { BusinessProfile, Contact, NumberCheck } from './model/contact';
+import { Message, MessageInfo, PollData } from './model/message';
 import { default as axios, AxiosRequestConfig} from 'axios';
-import { ParticipantChangedEventModel } from './model/group-metadata';
+import { NewCommunityGroup, ParticipantChangedEventModel, GenericGroupChangeEvent, GroupMetadata } from './model/group-metadata';
 import { useragent } from '../config/puppeteer.config'
 import { ConfigObject, STATE, LicenseType, Webhook, OnError, EventPayload } from './model';
 import { PageEvaluationTimeout, CustomError, ERROR_NAME, AddParticipantError  } from './model/errors';
@@ -19,7 +19,7 @@ import { readJsonSync } from 'fs-extra'
 import { HealthCheck, SessionInfo } from './model/sessionInfo';
 import { deleteSessionData, injectApi, initPage, kill, invalidateSesssionData} from '../controllers/browser';
 import { isAuthenticated, QRManager, waitForRipeSession } from '../controllers/auth';
-import { ChatId, GroupChatId, Content, Base64, MessageId, ContactId, DataURL, AdvancedFile } from './model/aliases';
+import { ChatId, GroupChatId, Content, Base64, MessageId, ContactId, DataURL, AdvancedFile, GroupId } from './model/aliases';
 import { bleachMessage, decryptMedia } from '@open-wa/wa-decrypt';
 import * as path from 'path';
 import { CustomProduct, Order, Product } from './model/product';
@@ -34,7 +34,7 @@ import { Listener } from 'eventemitter2';
 import PriorityQueue from 'p-queue/dist/priority-queue';
 import { MessagePreprocessors } from '../structures/preProcessors';
 import { NextFunction, Request, Response } from 'express';
-import { base64MimeType, ensureDUrl, generateGHIssueLink, getDUrl, isBase64, isDataURL, now } from '../utils/tools';
+import { assertFile, processSendData, base64MimeType, ensureDUrl, FileOutputTypes, generateGHIssueLink, getDUrl, isBase64, isDataURL, now, rmFileAsync, timePromise } from '../utils/tools';
 import { Call } from './model/call';
 import { AdvancedButton, Button, LocationButtonBody, Section } from './model/button';
 import { JsonObject } from 'type-fest';
@@ -64,12 +64,15 @@ declare module WAPI {
   const onOrder: (callback: Function) => any;
   const onNewProduct: (callback: Function) => any;
   const onIncomingCall: (callback: Function) => any;
+  const onCallState: (callback: Function) => any;
   const onAddedToGroup: (callback: Function) => any;
   const onBattery: (callback: Function) => any;
   const onPlugged: (callback: Function) => any;
+  const isSessionLoaded: () => any;
   const onGlobalParticipantsChanged: (callback: Function) => any;
   const onStory: (callback: Function) => any;
   const setChatBackgroundColourHex: (hex: string) => boolean;
+  const joinWebBeta: (join: boolean) => boolean;
   const darkMode: (activate: boolean) => boolean;
   const autoReject: (message: string) => boolean;
   const emitUnreadMessages: () => boolean;
@@ -87,6 +90,7 @@ declare module WAPI {
   const postTextStatus: (text: string, textRgba: string, backgroundRgba: string, font: string) => Promise<string | boolean>;
   const postImageStatus: (data: string, caption: string) => Promise<string | boolean>;
   const postVideoStatus: (data: string, caption: string) => Promise<string | boolean>;
+  const sendStoryWithThumb:  (thumb:string, url: string, title: string, description: string, text: string, textRgba: string, backgroundRgba: string, font: string) => Promise<string>;
   const setChatState: (chatState: ChatState, chatId: string) => void;
   const reply: (to: string, content: string, quotedMsg: string | Message) => Promise<string|boolean>;
   const getGeneratedUserAgent: (userAgent?: string) => string;
@@ -101,6 +105,7 @@ declare module WAPI {
   const getMessageById: (mesasgeId: string) => Message;
   const getMessageInfo: (mesasgeId: string) => Promise<any>;
   const getOrder: (id: string) => Order;
+  const createTemporaryFileInput: () => any;
   const getMyLastMessage: (chatId: string) => Promise<Message>;
   const getStarredMessages: (chatId: string) => Promise<Message[]>;
   const starMessage: (messageId: string) => Promise<boolean>;
@@ -113,6 +118,7 @@ declare module WAPI {
   const setProfilePic: (data: string) => Promise<boolean>;
   const setPresence: (available: boolean) => void;
   const getMessageReaders: (messageId: string) => Contact[];
+  const getPollData: (messageId: string) => any;
   const getStatus: (contactId: string) => void;
   const B: (chatId: string, payload: any) => MessageId;
   const getCommonGroups: (contactId: string) => Promise<{id:string,title:string}[]>;
@@ -127,11 +133,14 @@ declare module WAPI {
   const demoteParticipant: (groupId: string, contactId: string) => Promise<boolean | string>;
   const setGroupToAdminsOnly: (groupId: string, onlyAdmins: boolean) => Promise<boolean>;
   const setGroupEditToAdminsOnly: (groupId: string, onlyAdmins: boolean) => Promise<boolean>;
+  const setGroupApprovalMode: (groupId: string, requireApproval: boolean) => Promise<boolean>;
   const setGroupDescription: (groupId: string, description: string) => Promise<boolean>;
   const setGroupTitle: (groupId: string, title: string) => Promise<boolean>;
+  const sendPoll: (groupId: string, name: string, options: string[], quotedMsgId ?: string, allowMultiSelect ?: boolean) => Promise<string>;
   const sendImageAsSticker: (webpBase64: string, to: string, metadata?: any) => Promise<string | boolean>;
   const sendStickerAsReply: (webpBase64: string, to: string, messageId: string, metadata?: any) => Promise<string | boolean>;
   const createGroup: (groupName: string, contactId: string|string[]) => Promise<any>;
+  const createCommunity: (communityName: string, communitySubject: string, icon : string, existingGroups : string[], newGroups : any[]) => Promise<any>;
   const sendCustomProduct: (to: ChatId, image: DataURL, productData: CustomProduct) => Promise<string | boolean>;
   const sendSeen: (to: string) => Promise<boolean>;
   const markAsUnread: (to: string) => Promise<boolean>;
@@ -140,6 +149,7 @@ declare module WAPI {
   const contactBlock: (id: string) => Promise<boolean>;
   const checkReadReceipts: (contactId: string) => Promise<boolean | string>;
   const REPORTSPAM: (id: string) => Promise<boolean>;
+  const acceptGroupJoinRequest: (id: string) => Promise<boolean>;
   const contactUnblock: (id: string) => Promise<boolean>;
   const deleteConversation: (chatId: string) => Promise<boolean>;
   const isChatMuted: (chatId: string) => Promise<boolean>;
@@ -151,6 +161,9 @@ declare module WAPI {
   const sendListMessage: (to: ChatId, sections : any, title : string, description : string, actionText : string) => Promise<any>;
   const ghostForward: (chatId: string, messageId: string) => Promise<boolean>;
   const revokeGroupInviteLink: (chatId: string) => Promise<string> | Promise<boolean>;
+  const getGroupApprovalRequests: (chatId: string) => Promise<string> | Promise<boolean>;
+  const approveGroupJoinRequest: (groupChatId: string, contactId: string) => Promise<string> | Promise<boolean>;
+  const rejectGroupJoinRequest: (groupChatId: string, contactId: string) => Promise<string> | Promise<boolean>;
   const getGroupInviteLink: (chatId: string) => Promise<string>;
   const sendImage: (
     base64: string,
@@ -170,9 +183,18 @@ declare module WAPI {
     title: string,
     description: string,
     text: string,
-    chatId: string
+    chatId: string,
+    quotedMsgId: string,
+    customSize: any
   ) => Promise<boolean>;
   const getBusinessProfilesProducts: (to: string) => Promise<any>;
+  const getBusinessProfile: (to: string) => Promise<any>;
+  const editMessage: (messageId: string, text: string) => Promise<any>;
+  const getCommunityInfo: (groupId: string) => Promise<any>;
+  const getCommunityAdminIds: (groupId: string) => Promise<any>;
+  const getCommunityAdmins: (groupId: string) => Promise<any>;
+  const getCommunityParticipantIds: (groupId: string) => Promise<any>;
+  const getCommunityParticipants: (groupId: string) => Promise<any>;
   const postStatus: (text: string, params: any) => Promise<any>;
   const deleteStatus: (statusesToDelete: string | string[]) => Promise<any>;
   const sendImageWithProduct: (base64: string, to: string, caption: string, bizNumber: string, productId: string) => any;
@@ -201,7 +223,7 @@ declare module WAPI {
   const getKickedGroups: () => Promise<String[]>;
   const launchMetrics: () => Promise<any>;
   const getLicenseType: () => Promise<String | false>;
-  const getTunnelCode: () => Promise<String | false>;
+  const getTunnelCode: (sessionId: string) => Promise<String | false>;
   const getChatWithNonContacts: () => Contact[];
   const syncContacts: () => boolean;
   const getAmountOfLoadedMessages: () => number;
@@ -210,11 +232,13 @@ declare module WAPI {
   const getAllUnreadMessages: () => any;  
   const getIndicatedNewMessages: () => any;
   const getAllChatsWithMessages: (withNewMessageOnly?: boolean) => any;
+  const getGptArray: (chatId: string, last?: number) => any;
   const getAllChats: () => any;
+  const getCommunities: () => any;
   const healthCheck: () => any;
   const getState: () => string;
   const getUnsentMessages: () => Promise<Message[]>;
-  const forceUpdateConnectionState: () => Promise<string>;
+  const forceUpdateConnectionState: (killBeforeReconnect: boolean) => Promise<string>;
   const getBatteryLevel: () => number;
   const getIsPlugged: () => boolean;
   const clearAllChats: (ts ?: number) => Promise<boolean>;
@@ -231,7 +255,7 @@ declare module WAPI {
   const getUseHereString: () => Promise<string>;
   const getLocaledString: (query: string) => Promise<string>;
   const getHostNumber: () => string;
-  const getAllGroups: () => Promise<Chat[]>;
+  const getAllGroups: (withNewMessagesOnly:string) => Promise<Chat[]>;
   const getGroupParticipantIDs: (groupId: string) => Promise<string[]>;
   const getGroupInfo: (groupId: string) => Promise<any>;
   const joinGroupViaLink: (link: string, returnChatObj?: boolean) => Promise<string | boolean | number | Chat>;
@@ -290,13 +314,14 @@ export class Client {
   private _currentlyBeingKilled = false;
   private _refreshing = false
   private _loaded = false;
+  private _hostAccountNumber;
   private _prio: number = Number.MAX_SAFE_INTEGER;
   private _pageListeners : {
-    event: keyof PageEventObject,
+    event: keyof PageEvent,
     callback: any,
     priority ?: number
   }[] = [];
-  private _registeredPageListeners : (keyof PageEventObject)[] = [];
+  private _registeredPageListeners : (keyof PageEvent)[] = [];
   private _onLogoutCallbacks : any[] = [];
   private _queues: {
     [key in SimpleListener] ?: PQueue
@@ -330,7 +355,6 @@ export class Client {
     this._sessionInfo = sessionInfo;
     this._sessionInfo.INSTANCE_ID = uuidv4();
     this._listeners = {};
-    if(this._createConfig.stickerServerEndpoint!== false) this._createConfig.stickerServerEndpoint = true;
     this._setOnClose();
   }
 
@@ -342,6 +366,12 @@ export class Client {
    * Run all tasks to set up client AFTER init is fully completed
    */
   async loaded() : Promise<void> {
+    /**
+     * Wait for internal session to load earlier messages
+     */
+    log.info('Waiting for internal session to finish syncing')
+    const syncT = await timePromise(()=>this._page.waitForFunction(()=>WAPI.isSessionLoaded(), {timeout: 20000, polling: 50})).catch(()=>20001)
+    log.info(`Internal session finished syncing in ${syncT}ms`)
       if(this._createConfig?.eventMode) {
         await this.registerAllSimpleListenersOnEv();
       }
@@ -357,6 +387,7 @@ export class Client {
             if(!emojiId) return;
             await this._autoEmojiQ.add(async() => this.sendEmoji(message.from,emojiId,message.id).catch(()=>{}))
           }
+          return message
         })
         this._autoEmojiSet = true;
       }
@@ -366,7 +397,7 @@ export class Client {
             await this._queues?.onLogout?.onEmpty();
             await this._queues?.onLogout?.onIdle();
             await invalidateSesssionData(this._createConfig)
-            if(this._createConfig?.deleteSessionDataOnLogout) deleteSessionData(this._createConfig)
+            if(this._createConfig?.deleteSessionDataOnLogout) await deleteSessionData(this._createConfig)
             if(this._createConfig?.killClientOnLogout) {
               console.log("Session logged out. Killing client")
               log.warn("Session logged out. Killing client")
@@ -513,6 +544,17 @@ export class Client {
    */
   public getSessionInfo() : SessionInfo {
     return this._sessionInfo;
+  }
+
+  /**
+   * Easily resize page on the fly. Useful if you're showing screenshots in a web-app.
+   */
+  public async resizePage(width = 1920, height = 1080) : Promise<boolean> {
+    await this._page.setViewport({
+      width,
+      height
+    });
+    return true;
   }
 
   /**
@@ -665,7 +707,13 @@ export class Client {
       return true
     }
     this._listeners[funcName] = fn;
-    const exists = await this.pup(({funcName})=>window[funcName]?true:false,{funcName});
+    /**
+     * First check if the function is exposed to the page
+     */
+    const exists = await this.pup(({checkFuncName})=>window[checkFuncName]?true:false,{checkFuncName:funcName});
+    /**
+     * If it is exposed to the page then set the listener to that exposed function
+     */
     if(exists) return await set();
     const res = await this._page.exposeFunction(funcName, (obj: any) =>fn(obj)).then(set).catch(()=>set) as Promise<boolean>;
     return res;
@@ -674,7 +722,7 @@ export class Client {
   // NON-STANDARD LISTENERS
 
   private registerPageEventListener(_event: string, callback : any, priority ?: number) {
-    const event : keyof PageEventObject = _event as keyof PageEventObject
+    const event : keyof PageEvent = _event as keyof PageEvent
     this._pageListeners.push({
       event,
       callback,
@@ -682,7 +730,7 @@ export class Client {
     })
     if(this._registeredPageListeners.includes(event)) return true;
     this._registeredPageListeners.push(event);
-    log.info(`setting page listener: ${event}`, this._registeredPageListeners)
+    log.info(`setting page listener: ${String(event)}`, this._registeredPageListeners)
     this._page.on(event, async (...args) => {
       await Promise.all(this._pageListeners.filter(l => l.event === event).filter(({priority})=>priority!==-1).sort((a,b)=>(b.priority || 0)-(a.priority || 0)).map(l => l.callback(...args)))
       await Promise.all(this._pageListeners.filter(l => l.event === event).filter(({priority})=>priority==-1).sort((a,b)=>(b.priority || 0)-(a.priority || 0)).map(l => l.callback(...args)))
@@ -718,7 +766,7 @@ export class Client {
       intervalCap: 1,
       carryoverConcurrencyCount: true
     })
-    if(this._registeredPageListeners.includes(event)) return true;
+    if(this._registeredPageListeners.includes(event as keyof PageEvent)) return true;
     this.registerPageEventListener(event, async frame => {
         if(frame.url().includes('post_logout=1')) {
           console.log("LOGGED OUT")
@@ -764,10 +812,12 @@ export class Client {
 
 
   // STANDARD SIMPLE LISTENERS
-  private async preprocessMessage(message: Message) : Promise<Message> {
+  private async preprocessMessage(message: Message, source: 'onMessage' | 'onAnyMessage') : Promise<Message> {
+    let alreadyProcessed = false;
     if(this._preprocIdempotencyCheck[message.id]) {
       log.info(`preprocessMessage: ${message.id} already being processed`)
-      return message;
+      // return message;
+      alreadyProcessed = true;
     }
     this._preprocIdempotencyCheck[message.id] = true;
     let fil = "";
@@ -777,10 +827,25 @@ export class Client {
         //do nothing
     }
     const m = fil ? [message].filter(typeof fil == "function" ? fil : x=>x)[0] : message;
-    if(m && this._createConfig.messagePreprocessor && MessagePreprocessors[this._createConfig.messagePreprocessor] && message.mimetype) {
-      log.info(`Preproc START: ${this._createConfig.messagePreprocessor} ${fil} ${message.id} ${m.id}`)
-      log.info(`Preproccessing message: ${this._createConfig.messagePreprocessor}`)
-      const preprocres = (await MessagePreprocessors[this._createConfig.messagePreprocessor](m, this) || message)
+    if(m && this._createConfig.messagePreprocessor) {
+      if(!Array.isArray(this._createConfig.messagePreprocessor)) this._createConfig.messagePreprocessor = [this._createConfig.messagePreprocessor];
+      /**
+       * Map/chain over the preprocs and resolve.
+       * 
+       * Each promise will update the _m value which is just a mutatable message object.
+       */
+      let _m = m;
+      await Promise.all(this._createConfig.messagePreprocessor.map(async (preproc, index) => {
+        let custom = false;
+        const start = Date.now()
+        if(typeof preproc === "function") {
+          custom = true;
+          _m = await preproc(_m, this, alreadyProcessed, source)
+        } else if(typeof preproc === "string" && MessagePreprocessors[preproc]) _m = await MessagePreprocessors[preproc](_m, this, alreadyProcessed, source)
+        log.info(`Preproc ${custom ? 'CUSTOM' : preproc} ${index} ${fil} ${message.id} ${m.id} ${Date.now() - start}ms`)
+        return _m;
+      }))
+      const preprocres = _m || message
       delete this._preprocIdempotencyCheck[message.id];
       return preprocres
     }
@@ -797,7 +862,7 @@ export class Client {
    * @fires [[Message]]
    */
    public async onMessage(fn: (message: Message) => void, queueOptions ?: Options<PriorityQueue, DefaultAddOptions>) : Promise<Listener | boolean> {
-    const _fn = async (message : Message) => fn(await this.preprocessMessage(message))
+    const _fn = async (message : Message) => fn(await this.preprocessMessage(message, 'onMessage'))
     return this.registerListener(SimpleListener.Message, _fn, this?._createConfig?.pQueueDefault || queueOptions);
   }
 
@@ -810,7 +875,7 @@ export class Client {
    * @fires [[Message]] 
    */
   public async onAnyMessage(fn: (message: Message) => void, queueOptions ?: Options<PriorityQueue, DefaultAddOptions>) : Promise<Listener | boolean> {
-    const _fn = async (message : Message) => fn(await this.preprocessMessage(message))
+    const _fn = async (message : Message) => fn(await this.preprocessMessage(message, 'onAnyMessage'))
     return this.registerListener(SimpleListener.AnyMessage, _fn, this?._createConfig?.pQueueDefault || queueOptions);
   }
 
@@ -847,6 +912,16 @@ export class Client {
   }
 
   /**
+   * Listens to poll vote events
+   * @event 
+   * @param fn callback
+   * @fires [[PollData]]
+   */
+   public async onPollVote(fn: (pollDate: PollData) => void) : Promise<Listener | boolean> {
+    return this.registerListener(SimpleListener.PollVote, fn);
+  }
+
+  /**
    * Listens to broadcast messages
    * @event 
    * @param fn callback
@@ -857,7 +932,15 @@ export class Client {
   }
 
   /** 
+   * @deprecated
+   * 
    * Listens to battery changes
+   * 
+   * :::caution
+   *
+   *  This will most likely not work with multi-device mode (the only remaining mode) since the session is no longer connected to the phone but directly to WA servers.
+   * 
+   * :::
    * 
    * @event 
    * @param fn callback
@@ -879,7 +962,8 @@ export class Client {
   }
 
   /**
-   * Requires a Story License Key 
+   * {@license:restricted@}
+   * 
    * Listens to when a contact posts a new story.
    * @event
    * 
@@ -912,10 +996,19 @@ export class Client {
    * @event 
    * @returns Observable stream of call request objects
    */
-  public async onIncomingCall(fn: (call: Call) => void) : Promise<Listener | boolean> {
+   public async onIncomingCall(fn: (call: Call) => void) : Promise<Listener | boolean> {
     return this.registerListener(SimpleListener.IncomingCall, fn);
   }
-  
+
+  /**
+   * Listens to changes on call state
+   * @event 
+   * @returns Observable stream of call objects
+   */
+   public async onCallState(fn: (call: Call) => void) : Promise<Listener | boolean> {
+    return this.registerListener(SimpleListener.CallState, fn);
+  }
+
   /**
    * Listens to label change events
    * 
@@ -1001,6 +1094,28 @@ export class Client {
    */
   public async onGlobalParticipantsChanged(fn: (participantChangedEvent: ParticipantChangedEventModel) => void) : Promise<Listener | boolean> {
     return this.registerListener(SimpleListener.GlobalParticipantsChanged, fn);
+  }
+
+  /**
+   * Listents to group approval requests. Emits a message object. Use it with `message.isGroupApprovalRequest()` to check if it is a group approval request.
+   * 
+   * @event
+   * @param fn callback function that handles a [[Message]] as the first and only parameter.
+   * @returns `true` if the callback was registered
+   */
+  public async onGroupApprovalRequest(fn: (groupApprovalRequestMessage: Message) => void) : Promise<Listener | boolean> {
+    return this.registerListener(SimpleListener.GroupApprovalRequest, fn);
+  }
+
+  /**
+   * Listens to all group (gp2) events. This can be useful if you want to catch when a group title, subject or picture is changed.
+   * 
+   * @event
+   * @param fn callback function that handles a [[ParticipantChangedEventModel]] as the first and only parameter.
+   * @returns `true` if the callback was registered
+   */
+  public async onGroupChange(fn: (genericGroupChangeEvent: GenericGroupChangeEvent) => void) : Promise<Listener | boolean> {
+    return this.registerListener(SimpleListener.GroupChange, fn);
   }
 
   /**
@@ -1257,11 +1372,12 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
   }
 
   /**
-   * Forces the session to update the connection state. This will take a few seconds to determine the 'correct' state.
+   * Forces the session to update the connection state.
+   * @param killBeforeAttemptingToReconnect Setting this to true will force the session to drop the current socket connection before attempting to reconnect. This is useful if you want to force the session to reconnect immediately.
    * @returns updated connection state
    */
-  public async forceUpdateConnectionState() : Promise<STATE> {
-    return await this._page.evaluate(() => WAPI.forceUpdateConnectionState()) as STATE;
+  public async forceUpdateConnectionState(killBeforeReconnect?: boolean) : Promise<STATE> {
+    return await this._page.evaluate((killBeforeReconnect) => WAPI.forceUpdateConnectionState(killBeforeReconnect),killBeforeReconnect) as STATE;
   }
 
   /**
@@ -1278,8 +1394,8 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
   public async kill(reason = "MANUALLY_KILLED") : Promise<boolean> {
     if(this._currentlyBeingKilled) return;
     this._currentlyBeingKilled = true;
-    console.log('Killing client. Shutting Down');
-    log.info('Killing client. Shutting Down')
+    console.log(`Killing client. Shutting Down: ${reason}`);
+    log.info(`Killing client. Shutting Down: ${reason}`)
     const browser = await this?._page?.browser()
     const pid = browser?.process() ? browser?.process()?.pid : null;
     try{
@@ -1348,6 +1464,15 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
   }
 
   /**
+   * 
+   * @deprecated
+   * 
+   * :::danger
+   *
+   * Buttons are broken for the foreseeable future. Please DO NOT get a license solely for access to buttons. They are no longer reliable due to recent changes at WA.
+   * 
+   * :::
+   * 
    * Test the button commands on MD accounts with an insiders key. This is a temporary feature to help fix issue #2658
    */
   public async testButtons(chatId: ChatId): Promise<any>  {
@@ -1362,6 +1487,13 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
   private async link(params ?: string) : Promise<string> {
     const _p = [this._createConfig?.linkParams,params].filter(x=>x).join('&')
     return `https://get.openwa.dev/l/${await this.getHostNumber()}${_p?`?${_p}`:''}`
+  }
+
+  /**
+   * Generate a license link
+   */
+  public async getLicenseLink(params ?: string) : Promise<string> {
+    return await this.link(params)
   }
 
   /**
@@ -1427,6 +1559,25 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
     ) as Promise<boolean | MessageId>;
   }
 
+
+  /**
+   * NOTE: This is experimental, most accounts do not have access to this feature in their apps.
+   * 
+   * Edit an existing message
+   * 
+   * @param messageId The message ID to edit
+   * @param text The new text content
+   * @returns 
+   */
+  public async editMessage(messageId: MessageId, text: Content) : Promise<boolean | MessageId> {
+    return await this.pup(
+      ({ messageId, text }) => {
+        return WAPI.editMessage(messageId, text);
+      },
+      { messageId, text }
+    ) as Promise<boolean | MessageId>;
+  }
+
   /** 
    * [UNTESTED - REQUIRES FEEDBACK]
    * Sends a payment request message to given chat
@@ -1447,7 +1598,17 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
 
   
   /**
-   * {@license:insiders@}
+   * 
+   * @deprecated
+   * 
+   * :::danger
+   * 
+   * WA BIZ accounts CANNOT send buttons. This is a WA limitation. DO NOT get a license solely for access to buttons on wa business accounts.
+   * THIS IS NOT WORKING FOR GROUPS YET.
+   * 
+   * BUTTONS ARE DEPRECATED FOR NOW. DO NOT GET A LICENSE TO USE BUTTONS.
+   * 
+   * :::
    * 
    * Send generic quick reply buttons. This is an insiders feature for MD accounts.
    * 
@@ -1468,16 +1629,22 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
 
   
   /**
-   * {@license:insiders@}
+   * @deprecated
+   * 
+   * :::danger
+   *
+   * Template messages (URL & CALL buttons) are broken for the foreseeable future. Please DO NOT get a license solely for access to URL or CALL buttons. They are no longer reliable due to recent changes at WA.
+   * WA BIZ accounts CANNOT send buttons. This is a WA limitation. DO NOT get a license solely for access to buttons on wa business accounts.
+   * 
+   * THIS IS NOT WORKING FOR GROUPS YET.
+   * 
+   * ADVANCED ARE DEPRECATED FOR NOW. DO NOT GET A LICENSE TO USE BUTTONS.
+   * 
+   * :::
+   * 
    * 
    * Send advanced buttons with media body. This is an insiders feature for MD accounts.
-   * 
-   * :::caution
-   *
-   *  Button messages are being progressively handicapped by recipient mobile devices. Some recipients may not see some types of button messages even though their devices will receive them.
-   * 
-   *  :::
-   * 
+   *  
    * Body can be location, image, video or document. Buttons can be quick reply, url or call buttons.
    * 
    * @param  {ChatId} to chat id
@@ -1530,7 +1697,17 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
 
 
    /**
-    * {@license:insiders@}
+    * 
+    * @deprecated
+    * 
+    * :::danger
+    * 
+    * It is not currently possible to send a listmessage to a group chat. This is a WA limitation.
+    * Please DO NOT get a license solely for access to list messages in group chats.
+    * 
+    * LIST MESSAGES ARE DEPRECATED TILL FURTHER NOTICE
+    * 
+    * :::
     * 
     * Send a list message. This will not work when being sent from business accounts!
     * 
@@ -1601,7 +1778,8 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
    * @param description The long description of the link preview
    * @param text The text you want to inslude in the message section. THIS HAS TO INCLUDE THE URL otherwise the url will be prepended to the text automatically.
    * @param chatId The chat you want to send this message to.
-   * 
+   * @param quotedMsgId [INSIDERS] Send this link preview message in response to a given quoted message
+   * @param customSize [INSIDERS] Anchor the size of the thumbnail
    */
   public async sendMessageWithThumb(
     thumb: string,
@@ -1609,21 +1787,28 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
     title: string,
     description: string,
     text: Content,
-    chatId: ChatId) : Promise<MessageId | boolean> {
+    chatId: ChatId,
+    quotedMsgId?: MessageId,
+    customSize?: {height: number, width: number}
+    ) : Promise<MessageId | boolean> {
     return await this.pup(
       ({ thumb,
         url,
         title,
         description,
         text,
-        chatId
+        chatId,
+        quotedMsgId,
+        customSize
       }) => {
         WAPI.sendMessageWithThumb(thumb,
           url,
           title,
           description,
           text,
-          chatId);
+          chatId,
+          quotedMsgId,
+          customSize);
       },
       {
         thumb,
@@ -1631,8 +1816,9 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
         title,
         description,
         text,
-        chatId
-
+        chatId,
+        quotedMsgId,
+        customSize
       }
     ) as Promise<boolean>;
   }
@@ -1709,32 +1895,48 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
     ptt?:boolean,
     withoutPreview?:boolean,
     hideTags ?: boolean,
-    viewOnce ?: boolean
+    viewOnce ?: boolean,
+    requestConfig ?: any
   ) : Promise<MessageId | boolean> {
-      //check if the 'base64' file exists
-      if(!isDataURL(file) && !isBase64(file) && !file.includes("data:")) {
-        //must be a file then
-        const relativePath = path.join(path.resolve(process.cwd(),file|| ''));
-        if(fs.existsSync(file) || fs.existsSync(relativePath)) {
-          file = await datauri(fs.existsSync(file)  ? file : relativePath);
-        } else if(isUrl(file)){
-          return await this.sendFileFromUrl(to,file,filename,caption,quotedMsgId,{},waitForId,ptt,withoutPreview, hideTags, viewOnce);
-        } else throw new CustomError(ERROR_NAME.FILE_NOT_FOUND,`Cannot find file. Make sure the file reference is relative, a valid URL or a valid DataURL: ${file.slice(0,25)}`)
-      } else if(file.includes("data:") && file.includes("undefined") || file.includes("application/octet-stream") && filename && mime.lookup(filename)) {
-        file = `data:${mime.lookup(filename)};base64,${file.split(',')[1]}`
-      }
+    const err = [
+     'Not able to send message to broadcast',
+     'Not a contact',
+     'Error: Number not linked to WhatsApp Account',
+     'ERROR: Please make sure you have at least one chat'
+    ];
+
+    /**
+     * TODO: File upload improvements
+     * 1. *Create an arbitrary file input element
+     * 2. *Take the file parameter and create a tempfile in temp dir
+     * 3. Forward the tempfile path to the file input, upload the file to the browser context.
+     * 4. Instruct the WAPI.sendImage function to consume the file from the element in step 1.
+     * 5. *Destroy the input element from the page (happens in wapi.sendimage)
+     * 6. *Unlink/rm the tempfile
+     * 7. Return the ID of the WAPI.sendImage function.
+     */
+    const [[inputElementId, inputElement], fileAsLocalTemp] = await Promise.all([
+      (async ()=>{
+        const inputElementId = await this._page.evaluate(()=>WAPI.createTemporaryFileInput());
+        const inputElement = await this._page.$(`#${inputElementId}`);
+        return [inputElementId, inputElement];
+      })(),
+      assertFile(file, filename, FileOutputTypes.TEMP_FILE_PATH as any,requestConfig || {})
+    ])
+    //@ts-ignore
+    await inputElement.uploadFile(fileAsLocalTemp as string);
+    file = inputElementId;
     
-   const err = [
-    'Not able to send message to broadcast',
-    'Not a contact',
-    'Error: Number not linked to WhatsApp Account',
-    'ERROR: Please make sure you have at least one chat'
-   ];
+    /**
+     * Old method of asserting that the file be a data url - cons = time wasted serializing/deserializing large file to and from b64.
+     */
+    // file = await assertFile(file, filename, FileOutputTypes.DATA_URL as any,requestConfig || {}) as string
 
     const res = await this.pup(
       ({ to, file, filename, caption, quotedMsgId, waitForId, ptt, withoutPreview, hideTags, viewOnce}) =>  WAPI.sendImage(file, to, filename, caption, quotedMsgId, waitForId, ptt, withoutPreview, hideTags, viewOnce),
       { to, file, filename, caption, quotedMsgId, waitForId, ptt, withoutPreview, hideTags, viewOnce}
     )
+    if(fileAsLocalTemp) await rmFileAsync(fileAsLocalTemp as string)
     if(err.includes(res)) console.error(res);
     return (err.includes(res) ? false : res)  as MessageId | boolean;
   }
@@ -1746,9 +1948,11 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
  * @param url string A youtube link.
  * @param text string Custom text as body of the message, this needs to include the link or it will be appended after the link.
  * @param thumbnail string Base64 of the jpeg/png which will be used to override the automatically generated thumbnail.
+ * @param quotedMsgId [INSIDERS] Send this link preview message in response to a given quoted message
+ * @param customSize [INSIDERS] Anchor the size of the thumbnail
  */
-  public async sendYoutubeLink(to: ChatId, url: string, text: Content = '', thumbnail ?: Base64) : Promise<boolean | MessageId> {
-    return this.sendLinkWithAutoPreview(to,url,text, thumbnail);
+  public async sendYoutubeLink(to: ChatId, url: string, text: Content = '', thumbnail ?: Base64, quotedMsgId?: MessageId, customSize?: {height: number, width: number}) : Promise<boolean | MessageId> {
+    return this.sendLinkWithAutoPreview(to,url,text, thumbnail, quotedMsgId, customSize);
   }
 
 /**
@@ -1757,23 +1961,27 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
  * @param url string A link.
  * @param text string Custom text as body of the message, this needs to include the link or it will be appended after the link.
  * @param thumbnail Base64 of the jpeg/png which will be used to override the automatically generated thumbnail.
+ * @param quotedMsgId [INSIDERS] Send this link preview message in response to a given quoted message
+ * @param customSize [INSIDERS] Anchor the size of the thumbnail
  */
   public async sendLinkWithAutoPreview(
     to: ChatId,
     url: string,
     text?: Content,
-    thumbnail ?: Base64
+    thumbnail ?: Base64,
+    quotedMsgId?: MessageId,
+    customSize?: {height: number, width: number}
   ) : Promise<boolean | MessageId>  {
     let linkData;
     let thumb;
     try {
       linkData = (await axios.get(`${this._createConfig?.linkParser || "https://link.openwa.cloud/api"}?url=${url}`)).data;
-      log.info("Got link data", linkData)
+      log.info("Got link data")
       if(!thumbnail) thumb = await getDUrl(linkData.image);
     } catch (error) {
-      log.error(error)
+      console.error(error)
     }
-    if(linkData && (thumbnail || thumb)) return await this.sendMessageWithThumb(thumbnail || thumb,url,linkData.title, linkData.description, text, to);
+    if(linkData && (thumbnail || thumb)) return await this.sendMessageWithThumb(thumbnail || thumb,url,linkData.title, linkData.description, text, to, quotedMsgId, customSize);
     else return await this.pup(
       ({ to,url, text, thumbnail }) => WAPI.sendLinkWithAutoPreview(to,url,text, thumbnail),
       { to,url, text, thumbnail }
@@ -1845,9 +2053,10 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
     ptt?:boolean,
     withoutPreview?:boolean,
     hideTags ?: boolean,
-    viewOnce ?: boolean
+    viewOnce ?: boolean,
+    requestConfig ?: any
   ) : Promise<MessageId | boolean> {
-    return this.sendImage(to, file, filename, caption, quotedMsgId, waitForId, ptt, withoutPreview, hideTags, viewOnce);
+    return this.sendImage(to, file, filename, caption, quotedMsgId, waitForId, ptt, withoutPreview, hideTags, viewOnce, requestConfig);
   }
 
   /**
@@ -1877,9 +2086,9 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
   public async sendPtt(
     to: ChatId,
     file: AdvancedFile,
-    quotedMsgId: MessageId,
+    quotedMsgId?: MessageId,
   ) : Promise<MessageId> {
-    return this.sendImage(to, file, 'ptt.ogg', '', quotedMsgId, true, true) as Promise<MessageId> ;
+    return this.sendImage(to, file, 'ptt.ogg', '', quotedMsgId ? quotedMsgId : null, true, true) as Promise<MessageId> ;
   }
   
   /**
@@ -1897,7 +2106,28 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
   }
 
 
-
+  /**
+   * Send a poll to a group chat
+   * @param to chat id - a group chat is required
+   * @param name the name of the poll
+   * @param options an array of poll options
+   * @param quotedMsgId A message to quote when sending the poll
+   * @param allowMultiSelect Whether or not to allow multiple selections. default false
+   */
+  public async sendPoll(
+    to: GroupChatId,
+    name: string,
+    options: string[],
+    quotedMsgId ?: MessageId,
+    allowMultiSelect ?: boolean
+  ) : Promise<MessageId> {
+    return  await this.pup(
+      ({ to, name, options , quotedMsgId, allowMultiSelect }) => {
+        return WAPI.sendPoll(to, name, options, quotedMsgId, allowMultiSelect );
+      },
+      { to, name, options, quotedMsgId, allowMultiSelect }
+    )
+  }
 
   /**
    * Sends a video to given chat as a gif, with caption or not, using base64
@@ -1990,8 +2220,7 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
     hideTags ?: boolean,
     viewOnce ?: boolean
   ) : Promise<MessageId | boolean> {
-     const base64 = await getDUrl(url, requestConfig);
-      return await this.sendFile(to,base64,filename,caption,quotedMsgId,waitForId,ptt,withoutPreview, hideTags, viewOnce)
+      return await this.sendFile(to,url,filename,caption,quotedMsgId,waitForId,ptt,withoutPreview, hideTags, viewOnce, requestConfig)
   }
 
 /**
@@ -2010,9 +2239,13 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
 
   /**
    * Returns a PNG DataURL screenshot of the session
+   * @param chatId Chat ID to open before taking a snapshot
+   * @param width Width of the viewport for the snapshot. Height also required if you want to resize.
+   * @param height Height of the viewport for the snapshot. Width also required if you want to resize.
    * @returns `Promise<DataURL>`
    */
-  public async getSnapshot(chatId?: ChatId) : Promise<DataURL> {
+  public async getSnapshot(chatId ?: ChatId, width ?: number, height ?: number) : Promise<DataURL> {
+     if(width && height) await this.resizePage(width,height)
       const snapshotElement = chatId ? (await this._page.evaluateHandle(
         ({ chatId }) => WAPI.getSnapshotElement(chatId),
         { chatId }
@@ -2072,7 +2305,7 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
   /**
    * Find any product listings of the given number. Use this to query a catalog
    *
-   * @param id id of buseinss profile (i.e the number with @c.us)
+   * @param id id of business profile (i.e the number with @c.us)
    * @returns None
    */
   public async getBusinessProfilesProducts(id: ContactId) : Promise<any>   {
@@ -2082,6 +2315,18 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
     );
   }
 
+  /**
+   * Get the business info of a given contact id
+   *
+   * @param id id of business profile (i.e the number with @c.us)
+   * @returns None
+   */
+  public async getBusinessProfile(id: ContactId) : Promise<BusinessProfile>   {
+    return await this.pup(
+      ({ id }) => WAPI.getBusinessProfile(id),
+      { id }
+    );
+  }
 
   /**
    * Sends product with image to chat
@@ -2321,6 +2566,7 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
   }
 
   /**
+   * @deprecated No longer works due to multi-device changes
    * Retrieves Battery Level
    * @returns Number
    */
@@ -2341,7 +2587,8 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
    * @returns Number
    */
   public async getHostNumber() : Promise<string> {
-    return await this.pup(() => WAPI.getHostNumber()) as Promise<string>;
+    if(!this._hostAccountNumber) this._hostAccountNumber = await this.pup(() => WAPI.getHostNumber()) as Promise<string>;
+    return this._hostAccountNumber
   }
 
   /**
@@ -2357,7 +2604,8 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
    * @returns
    */
   public async getTunnelCode() : Promise<string> {
-    return await this.pup(() => WAPI.getTunnelCode()) as Promise<string>;
+    const sessionId = this.getSessionId();
+    return await this.pup(sessionId => WAPI.getTunnelCode(sessionId),sessionId) as Promise<string>;
   }
 
   /**
@@ -2420,19 +2668,37 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
     return JSON.parse(await this.pup(withNewMessageOnly => WAPI.getAllChatsWithMessages(withNewMessageOnly), withNewMessageOnly)) as Promise<Chat[]>;
   }
 
+
+  /**
+   * Returns a properly formatted array of messages from to send to the openai api
+   * 
+   * @param last The amount of previous messages to retrieve. Defaults to 10
+   * @returns 
+   */
+  public async getGptArray(chatId: ChatId, last = 10) : Promise<{
+    role: "user" | "assistant",
+    content: string
+  }[]> {
+    return await this.pup(({chatId, last}) => WAPI.getGptArray(chatId, last), {chatId, last}) as Promise<{
+      role: "user" | "assistant",
+      content: string
+    }[]>;
+  }
+
   /**
    * Retrieve all groups
    * @returns array of groups
    */
   public async getAllGroups(withNewMessagesOnly = false) : Promise<Chat[]> {
-    if (withNewMessagesOnly) {
-      // prettier-ignore
-      const chats = await this.pup(() => WAPI.getAllChatsWithNewMsg()) as Chat[];
-      return chats.filter(chat => chat.isGroup);
-    } else {
-      const chats = await this.pup(() => WAPI.getAllChats()) as Chat[];
-      return chats.filter(chat => chat.isGroup);
-    }
+      return await this.pup((withNewMessagesOnly) => WAPI.getAllGroups(withNewMessagesOnly), withNewMessagesOnly) as Chat[];
+  }
+
+  /**
+   * Retrieve all commmunity Ids
+   * @returns array of group ids
+   */
+  public async getAllCommunities() : Promise<GroupId[]> {
+      return await this.pup(() => WAPI.getCommunities()) as GroupId[];
   }
 
   /**
@@ -2457,7 +2723,107 @@ public async testCallback(callbackToTest: SimpleListener, testData: any)  : Prom
     ) as Promise<any>;
   }
 
+
+  /**
+   * Returns the community metadata. Like group metadata but with a `subGroups` property which is the group metadata of the community subgroups.
+   * @param communityId community id
+   */
+  public async getCommunityInfo(communityId: GroupChatId) : Promise<GroupMetadata & {
+    subGroups: GroupMetadata[]
+  }> {
+    return await this.pup(
+      communityId => WAPI.getCommunityInfo(communityId),
+      communityId
+    ) as Promise<any>;
+  }
+
+  /**
+   * 
+   * Accepts a request from a recipient to join a group. Takes the message ID of the request message.
+   * 
+   * @param {string} messageId
+   */
+  public async acceptGroupJoinRequest(messageId: MessageId) : Promise<boolean> {
+    return await this.pup(messageId => WAPI.acceptGroupJoinRequest(messageId),messageId)
+  }
   
+  /**
+   * Retrieves community members Ids
+   * @param communityId community id
+   */
+  public async getCommunityParticipantIds(communityId: GroupChatId) :  Promise<{
+    id: GroupChatId,
+    participants: ContactId[],
+    subgroup: boolean
+  }[]>{
+    return await this.pup(
+      communityId => WAPI.getCommunityParticipantIds(communityId),
+      communityId
+    ) as Promise<{
+      id: GroupChatId,
+      participants: ContactId[],
+      subgroup: boolean
+    }[]>;
+  }
+
+  /**
+   * Retrieves community admin Ids
+   * @param communityId community id
+   */
+  public async getCommunityAdminIds(communityId: GroupChatId) :  Promise<{
+    id: GroupChatId,
+    admins: ContactId[],
+    subgroup: boolean
+  }[]>{
+    return await this.pup(
+      communityId => WAPI.getCommunityAdminIds(communityId),
+      communityId
+    ) as Promise<{
+      id: GroupChatId,
+      admins: ContactId[],
+      subgroup: boolean
+    }[]>;
+  }
+
+
+  /**
+   * Retrieves community members as Contact objects
+   * @param communityId community id
+   */
+  public async getCommunityParticipants(communityId: GroupChatId) :  Promise<{
+    id: GroupChatId,
+    participants: Contact[],
+    subgroup: boolean
+  }[]>{
+    return await this.pup(
+      communityId => WAPI.getCommunityParticipants(communityId),
+      communityId
+    ) as Promise<{
+      id: GroupChatId,
+      participants: Contact[],
+      subgroup: boolean
+    }[]>;
+  }
+
+  /**
+   * Retrieves community admins as Contact objects
+   * @param communityId community id
+   */
+  public async getCommunityAdmins(communityId: GroupChatId) :  Promise<{
+    id: GroupChatId,
+    admins: Contact[],
+    subgroup: boolean
+  }[]>{
+    return await this.pup(
+      communityId => WAPI.getCommunityAdmins(communityId),
+      communityId
+    ) as Promise<{
+      id: GroupChatId,
+      admins: Contact[],
+      subgroup: boolean
+    }[]>;
+  }
+
 /** Joins a group via the invite link, code, or message
  * @param link This param is the string which includes the invite link or code. The following work:
  * - Follow this link to join my WA group: https://chat.whatsapp.com/DHTGJUfFJAV9MxOpZO1fBZ
@@ -2823,10 +3189,6 @@ public async contactUnblock(id: ContactId) : Promise<boolean> {
    * 
    * Retrieves the groups that you have in common with a contact
    * @param contactId
-   * @returns Promise returning an array of common groups {
-   * id:string,
-   * title:string
-   * }
    */
   public async getCommonGroups(contactId: ContactId) : Promise<{
     id: string,
@@ -2928,8 +3290,7 @@ public async contactUnblock(id: ContactId) : Promise<boolean> {
 
 /**
  * Get the status of a contact
- * @param contactId {string} to '000000000000@c.us'
- * returns: {id: string,status: string}
+ * @param contactId to '000000000000@c.us'
  */
 
 public async getStatus(contactId: ContactId) : Promise<{
@@ -2946,10 +3307,26 @@ public async getStatus(contactId: ContactId) : Promise<{
    * 
    * {@license:insiders@}
    * 
+   * :::danger
+   *
+   * Buttons are broken for the foreseeable future. Please DO NOT get a license solely for access to buttons. They are no longer reliable due to recent changes at WA.
+   * 
+   * :::
+   * 
    * Use a raw payload within your open-wa session
    * 
+   * @example
+   * If there is a code block, then both TypeDoc and VSCode will treat
+   * text outside of the code block as regular text.
+   * 
+   * ```ts
+   * await B('44123456789@c.us', {
+   *  test: 1
+   * })
+   * ```
+   * {@link loadAllEarlierMessages}
    * @param chatId
-   * @param payload {any} 
+   * @param payload
    * returns: MessageId
    */
    public async B(chatId: ChatId, payload: {
@@ -3047,6 +3424,46 @@ public async getStatus(contactId: ContactId) : Promise<{
     ) as Promise<string | boolean>;
   }
 
+
+  /**
+   * Gets the contact IDs of members requesting approval to join the group 
+   * @param groupChatId
+   * @returns `Promise<ContactId[]>`
+   */
+  public async getGroupApprovalRequests(groupChatId: GroupChatId) : Promise<ContactId[]>{
+    return await this.pup(
+      groupChatId => WAPI.getGroupApprovalRequests(groupChatId),
+      groupChatId
+    ) as Promise<ContactId[]>;
+  }
+
+
+  /**
+    * Approves a group join request
+   * @param groupChatId The group chat id
+   * @param contactId The contact id of the person who is requesting to join the group
+   * @returns `Promise<boolean>`
+   */
+  public async approveGroupJoinRequest(groupChatId: GroupChatId, contactId: ContactId) : Promise<boolean | string>{
+    return await this.pup(
+      ({groupChatId, contactId}) => WAPI.approveGroupJoinRequest(groupChatId, contactId),
+      {groupChatId, contactId}
+    ) as Promise<string | boolean>;
+  }
+
+  /**
+  * Rejects a group join request
+   * @param groupChatId The group chat id
+   * @param contactId The contact id of the person who is requesting to join the group
+   * @returns `Promise<boolean>`
+   */
+  public async rejectGroupJoinRequest(groupChatId: GroupChatId, contactId: ContactId) : Promise<boolean | string>{
+    return await this.pup(
+      ({groupChatId, contactId}) => WAPI.rejectGroupJoinRequest(groupChatId, contactId),
+      {groupChatId, contactId}
+    ) as Promise<string | boolean>;
+  }
+  
   /**
    * Deletes message of given message id
    * @param chatId The chat id from which to delete the message.
@@ -3073,7 +3490,7 @@ public async getStatus(contactId: ContactId) : Promise<{
   }
 
   /**
-   * Retrieves all undread Messages
+   * Retrieves all unread Messages
    * @param includeMe
    * @param includeNotifications
    * @param use_unread_count
@@ -3081,7 +3498,7 @@ public async getStatus(contactId: ContactId) : Promise<{
    */
   public async getUnreadMessages(includeMe: boolean, includeNotifications: boolean, use_unread_count: boolean) : Promise<Chat & {
     messages: Message[]
-  }> {
+  }[]> {
     return await this.pup(
       ({ includeMe, includeNotifications, use_unread_count }) => WAPI.getUnreadMessages(includeMe, includeNotifications, use_unread_count),
       { includeMe, includeNotifications, use_unread_count }
@@ -3175,6 +3592,24 @@ public async getStatus(contactId: ContactId) : Promise<{
   }
 
   /**
+   * {@license:insiders@}
+   * 
+   * Create a new community
+   * 
+   * @param communityName The community name
+   * @param communitySubject: The community subject line
+   * @param icon DataURL of a 1:1 ratio jpeg for the community icon
+   * @param existingGroups An array of existing group IDs, that are not already part of a community, to add to this new community.
+   * @param newGroups An array of new group objects that
+   */
+   public async createCommunity(communityName: string, communitySubject: string, icon : DataURL, existingGroups : GroupChatId[] = [], newGroups ?: NewCommunityGroup[]) : Promise<GroupId> {
+    return await this.pup(
+      ({ communityName, communitySubject, icon, existingGroups, newGroups  }) => WAPI.createCommunity(communityName, communitySubject, icon, existingGroups, newGroups ),
+      { communityName, communitySubject, icon, existingGroups, newGroups  }
+    );
+  }
+
+  /**
    * Remove participant of Group
    * 
    * If not a group chat, returns `NOT_A_GROUP_CHAT`.
@@ -3204,11 +3639,9 @@ public async getStatus(contactId: ContactId) : Promise<{
     const mimeInfo = base64MimeType(image);
     if(!mimeInfo || mimeInfo.includes("image")){
       let imgData;
-      if(this._createConfig.stickerServerEndpoint) {
         imgData = await this.stickerServerRequest('convertGroupIcon', {
           image
         })
-      }
       return await this.pup(
         ({ groupId, imgData }) => WAPI.setGroupIcon(groupId, imgData),
         { groupId, imgData }
@@ -3331,6 +3764,20 @@ public async getStatus(contactId: ContactId) : Promise<{
 }
 
   /**
+   * 
+  * Turn on or off the approval requirement for new members to join a group
+  * @param groupId '0000000000-00000000@g.us' the group id.
+  * @param requireApproval set to true to turn on the approval requirement, false to turn off
+  * @returns boolean true if action completed successfully.
+  */
+  public async setGroupApprovalMode(groupId: GroupChatId, requireApproval: boolean) : Promise<boolean> {
+    return await this.pup(
+      ({ groupId, requireApproval }) => WAPI.setGroupApprovalMode(groupId, requireApproval),
+      { groupId, requireApproval }
+    ) as Promise<boolean>;
+  }
+
+  /**
   * Change the group chant description
   * @param groupId '0000000000-00000000@g.us' the group id.
   * @param description string The new group description
@@ -3383,6 +3830,18 @@ public async getStatus(contactId: ContactId) : Promise<{
   }
 
   /**
+   * Join or leave the wa web beta program. Will return true of operation was successful.
+   * 
+   * @param {boolean} join true to join the beta, false to leave
+  */
+  public async joinWebBeta(join: boolean) : Promise<boolean> {
+    return await this.pup(
+      (join) => WAPI.joinWebBeta(join),
+      join
+    ) as Promise<boolean>;
+  }
+
+  /**
    * 
    * Start dark mode [NOW GENERALLY AVAILABLE]
    * @param {boolean} activate true to activate dark mode, false to deactivate
@@ -3420,6 +3879,19 @@ public async getStatus(contactId: ContactId) : Promise<{
       (messageId) => WAPI.getMessageReaders(messageId),
       messageId
     ) as Promise<Contact[]>;
+  }
+
+
+  /**
+   * Returns poll data including results and votes.
+   * 
+   * @param messageId The message id of the Poll
+   */
+  public async getPollData(messageId: MessageId) : Promise<PollData> {
+    return await this.pup(
+      (messageId) => WAPI.getPollData(messageId),
+      messageId
+    ) as Promise<PollData>;
   }
 
   /**
@@ -3514,7 +3986,7 @@ public async getStatus(contactId: ContactId) : Promise<{
   }
 
   private async stickerServerRequest(func: string, a : any = {}, fallback = false){
-    if(!this._createConfig.stickerServerEndpoint) return false;
+    const stickerUrl = this._createConfig.stickerServerEndpoint || (fallback ? pkg.stickerUrl : "https://sticker-api.openwa.dev") ||  "https://sticker-api.openwa.dev"
     if(func === 'convertMp4BufferToWebpDataUrl') fallback = true;
     const sessionInfo = this.getSessionInfo()
     sessionInfo.WA_AUTOMATE_VERSION = sessionInfo.WA_AUTOMATE_VERSION.split(' ')[0]
@@ -3540,7 +4012,9 @@ public async getStatus(contactId: ContactId) : Promise<{
         }
       }
       try {
-        const {data} = await axios.post(`${((fallback ?  pkg.stickerUrl : 'https://sticker-api.openwa.dev')|| this._createConfig.stickerServerEndpoint).replace(/\/$/, '')}/${func}`, {
+        const url = `${stickerUrl.replace(/\/$/, '')}/${func}`
+        log.info(`Requesting sticker from ${url}`)
+        const {data} = await axios.post(url, {
           ...a,
         sessionInfo,
         config: this.getConfig()
@@ -3570,13 +4044,10 @@ public async getStatus(contactId: ContactId) : Promise<{
       console.error("Not an image. Please use convertMp4BufferToWebpDataUrl to process video stickers");
       return false
     }
-    if(this._createConfig.stickerServerEndpoint) {
       return await this.stickerServerRequest('prepareWebp', {
         image,
         stickerMetadata
       })
-    }
-   
   }
 
   /**
@@ -3617,7 +4088,7 @@ public async getStatus(contactId: ContactId) : Promise<{
    * 
    * @param to ChatId The chat id you want to send the webp sticker to
    * @param file [[DataURL]], [[Base64]], URL (string GET), Relative filepath (string), or Buffer of the mp4 file
-   * @param messageId message id of the message you want this sticker to reply to. {@license:insiders@}
+   * @param messageId message id of the message you want this sticker to reply to. @license:insiders@
    */
   public async sendMp4AsSticker(to: ChatId, file: DataURL | Buffer | Base64 | string, processOptions: Mp4StickerConversionProcessOptions = defaultProcessOptions, stickerMetadata?: StickerMetadata, messageId ?: MessageId) : Promise<MessageId | string | boolean> {
     //@ts-ignore
@@ -3637,14 +4108,11 @@ public async getStatus(contactId: ContactId) : Promise<{
         } 
       }
       } 
-      let convertedStickerDataUrl;
-      if(this._createConfig.stickerServerEndpoint) {
-        convertedStickerDataUrl = await this.stickerServerRequest('convertMp4BufferToWebpDataUrl', {
+      const convertedStickerDataUrl = await this.stickerServerRequest('convertMp4BufferToWebpDataUrl', {
           file,
           processOptions,
           stickerMetadata
         })
-      } 
     try {
       if(!convertedStickerDataUrl) return false;
       return await (messageId && this._createConfig.licenseKey) ? this.sendRawWebpAsStickerAsReply(to, messageId, convertedStickerDataUrl, true) : this.sendRawWebpAsSticker(to, convertedStickerDataUrl, true);
@@ -3661,7 +4129,7 @@ public async getStatus(contactId: ContactId) : Promise<{
    * 
    * @param to ChatId The chat id you want to send the webp sticker to
    * @param emojiId The discord emoji id without indentifying chars. In discord you would write `:who:`, here use `who`
-   * @param messageId message id of the message you want this sticker to reply to. {@license:insiders@}
+   * @param messageId message id of the message you want this sticker to reply to. @license:insiders@
    */
   public async sendEmoji(to: ChatId, emojiId: string, messageId ?: MessageId) : Promise<MessageId | boolean | string> {
     const webp = await this.stickerServerRequest('emoji', {
@@ -3745,7 +4213,7 @@ public async getStatus(contactId: ContactId) : Promise<{
   }
   
   /**
-   * [REQUIRES A TEXT STORY LICENSE-KEY](https://gum.co/open-wa)
+   * {@license:restricted@}
    * 
    * Sends a formatted text story.
    * @param text The text to be displayed in the story 
@@ -3766,9 +4234,49 @@ public async getStatus(contactId: ContactId) : Promise<{
       { text, textRgba, backgroundRgba, font }
     ) as Promise<boolean | string>;
   }
+  
+  /**
+   * {@license:restricted@}
+   * 
+   * Sends a formatted text story with a thumbnail.
+   * @param url The URL to share in the story
+   * @param text The text to be displayed in the story 
+   * @param textRgba The colour of the text in the story in hex format, make sure to add the alpha value also. E.g "#FF00F4F2"
+   * @param backgroundRgba  The colour of the background in the story in hex format, make sure to add the alpha value also. E.g "#4FF31FF2"
+   * @param font The font of the text to be used in the story. This has to be a number. Each number refers to a specific predetermined font. Here are the fonts you can choose from:
+   * @param thumbnail base64 thumbnail override, if not provided the link server will try to figure it out.
+   * 0: Sans Serif
+   * 1: Serif
+   * 2: [Norican Regular](https://fonts.google.com/specimen/Norican)
+   * 3: [Bryndan Write](https://www.dafontfree.net/freefonts-bryndan-write-f160189.htm)
+   * @returns `Promise<MessageId>` returns status id if it worked, false if it didn't
+   */
+  public async postThumbnailStatus(
+    url: string,
+    text: Content,
+    textRgba : string,
+    backgroundRgba: string,
+    font: number,
+    thumbnail ?: Base64,
+    ) : Promise<MessageId>{
+    let linkData;
+    let thumb = thumbnail as string;
+    try {
+      linkData = (await axios.get(`${this._createConfig?.linkParser || "https://link.openwa.cloud/api"}?url=${url}`)).data;
+      log.info("Got link data")
+      if(!thumbnail) thumb = await getDUrl(linkData.image);
+    } catch (error) {
+      console.error(error)
+    }
+    const { title, description } = linkData
+    return await this.pup(
+      ({ thumb, url, title, description, text, textRgba, backgroundRgba, font }) => WAPI.sendStoryWithThumb(thumb, url, title, description, text, textRgba, backgroundRgba, font),
+      { thumb, url, title, description, text, textRgba, backgroundRgba, font }
+    ) as Promise<MessageId>;
+  }
 
   /**
-   * [REQUIRES AN IMAGE STORY LICENSE-KEY](https://gum.co/open-wa)
+   * {@license:restricted@}
    * 
    * Posts an image story.
    * @param data data url string `data:[<MIME-type>][;charset=<encoding>][;base64],<data>`
@@ -3783,7 +4291,7 @@ public async getStatus(contactId: ContactId) : Promise<{
   }
 
   /**
-   * [REQUIRES A VIDEO STORY LICENSE-KEY](https://gum.co/open-wa)
+   * {@license:restricted@}
    * 
    * Posts a video story.
    * @param data data url string `data:[<MIME-type>][;charset=<encoding>][;base64],<data>`
@@ -3799,43 +4307,74 @@ public async getStatus(contactId: ContactId) : Promise<{
 
 
 /**
- * Consumes a list of id strings of statuses to delete.
- * @param statusesToDelete string [] | stringan array of ids of statuses to delete.
+ * {@license:restricted@}
+ * 
+ * Consumes a list of id strings of stories to delete.
+ * 
+ * @param statusesToDelete string [] | string an array of ids of stories to delete.
  * @returns boolean. True if it worked.
  */
-  public async deleteStatus(statusesToDelete: string | string []) : Promise<boolean> {
+  public async deleteStory(statusesToDelete: string | string []) : Promise<boolean> {
     return await this.pup(
       ({ statusesToDelete }) => WAPI.deleteStatus(statusesToDelete),
       { statusesToDelete }
     );
   }
 
+  /**
+   * Alias for deleteStory
+   */
+  public async deleteStatus(statusesToDelete: string | string []) : Promise<boolean> {
+    return await this.deleteStory(statusesToDelete)
+  }
+
 /**
- * Deletes all your existing statuses.
+ * {@license:restricted@}
+ * 
+ * Deletes all your existing stories.
  * @returns boolean. True if it worked.
  */
-  public async deleteAllStatus() : Promise<boolean> {
+  public async deleteAllStories() : Promise<boolean> {
     return await this.pup(() => WAPI.deleteAllStatus());
   }
 
   /**
-   * retrieves all existing statuses.
+   * Alias for deleteStory
+   */
+   public async deleteAllStatus() : Promise<boolean> {
+    return await this.deleteAllStories();
+  }
+
+  /**
+   * {@license:restricted@}
+   * 
+   * Retrieves all existing stories.
    *
    * Only works with a Story License Key
    */
-  public async getMyStatusArray() : Promise<Message[]> {
+  public async getMyStoryArray() : Promise<Message[]> {
     return await this.pup(() => WAPI.getMyStatusArray());
+  }
+
+  /**
+   * Alias for deleteStory
+   */
+  public async getMyStatusArray() : Promise<Message[]> {
+    return await this.getMyStoryArray();
   }
 
     
   /**
-     * Retrieves an array of user ids that have 'read' your story.
-     * 
-     * @param id string The id of the story
-     * 
-     * Only works with a Story License Key
-     */
-    public async getStoryViewers(id: string) : Promise<ContactId[]> {
+   * {@license:restricted@}
+   * 
+   * Retrieves an array of user ids that have 'read' your story.
+   * 
+   * @param id string The id of the story
+   * 
+   */
+    public async getStoryViewers(id ?: string) : Promise<ContactId[] | {
+      [k: MessageId] : ContactId[]
+    }> {
       return await this.pup(({ id }) => WAPI.getStoryViewers(id),{id}) as Promise<ContactId[]>;
     }
   
@@ -4005,9 +4544,40 @@ public async getStatus(contactId: ContactId) : Promise<{
    * 
    * For example, if you have a session with id  `host` if you set useSessionIdInPath to true, then all requests will need to be prefixed with the path `host`. E.g `localhost:8082/sendText` becomes `localhost:8082/host/sendText`
    */
-  middleware = (useSessionIdInPath = false) => async (req : Request, res : Response, next : NextFunction) : Promise<any> => {
+  middleware = (useSessionIdInPath = false, PORT ?: number) => async (req : Request, res : Response, next : NextFunction) : Promise<any> => {
     if(useSessionIdInPath && !req.path.includes(this._createConfig.sessionId) && this._createConfig.sessionId!== 'session') return next();
     const methodFromPath = this._createConfig.sessionId && this._createConfig.sessionId!== 'session' && req.path.includes(this._createConfig.sessionId) ? req.path.replace(`/${this._createConfig.sessionId}/`,'') :  req.path.replace('/','');
+    if(req.get('owa-check-property') && req.get('owa-check-value')) {
+      const checkProp = req.get('owa-check-property')
+      const checkValue = req.get('owa-check-value')
+      const sessionId = this._createConfig.sessionId 
+      const hostAccountNumber = await this.getHostNumber();
+      let checkPassed = false
+      switch (checkProp) {
+        case 'session': 
+          checkPassed = sessionId === checkValue
+          break;
+        case 'number':
+          checkPassed = hostAccountNumber.includes(checkValue);
+          break;
+      }
+      if(!checkPassed) {
+        if(PORT) processSendData({port:PORT});
+        return res.status(412).send({
+          success: false,
+          error: {
+            name: 'CHECK_FAILED',
+            message:`Check FAILED - Are you sure you meant to send the request to this session?`,
+            data: {
+              incomingCheckProperty : checkProp,
+              incomingCheckValue : checkValue,
+              sessionId,
+              hostAccountNumber: `${hostAccountNumber.substr(-4)}`
+            }
+          }
+        })
+      }
+      }
     if(req.method==='POST') {
       const rb = req?.body || {};
       let {args} = rb
@@ -4032,7 +4602,7 @@ public async getStatus(contactId: ContactId) : Promise<{
         })
         } catch (error) {
         console.error("middleware -> error", error)
-        if(methodRequiresArgs && args==[]) error.message = `${req?.params ? "Please set arguments in request json body, not in params." : "Args expected, none found."} ${error.message}`
+        if(methodRequiresArgs && Array.isArray(args)) error.message = `${req?.params ? "Please set arguments in request json body, not in params." : "Args expected, none found."} ${error.message}`
         return res.send({
           success:false,
           error : {

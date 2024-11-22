@@ -11,19 +11,19 @@ import { deleteSessionData, initPage, injectApi, kill } from './browser';
 import { Spin } from './events'
 import { integrityCheck, checkWAPIHash } from './launch_checks';
 import CFonts from 'cfonts';
-import { generateGHIssueLink, getConfigFromProcessEnv, now } from '../utils/tools';
+import { generateGHIssueLink, getConfigFromProcessEnv, now, timePromise } from '../utils/tools';
 import { SessionInfo } from '../api/model/sessionInfo';
 import { Page } from 'puppeteer';
 import { createHash } from 'crypto';
 import { readJsonSync } from 'fs-extra'
 import { upload } from 'pico-s3';
-import { injectInitPatch } from './init_patch'
+import { injectInitPatch, injectInternalEventHandler } from './init_patch'
 import { earlyInjectionCheck, getLicense, getPatch, getAndInjectLivePatch, getAndInjectLicense } from './patch_manager';
 import { log, setupLogging } from '../logging/logging';
 
 export const pkg = readJsonSync(path.join(__dirname,'../../package.json')),
 configWithCases = readJsonSync(path.join(__dirname,'../../bin/config-schema.json')),
-timeout = (ms : number) => {
+timeout : (ms: number) => Promise<string> = (ms : number) => {
   return new Promise(resolve => setTimeout(resolve, ms, 'timeout'));
 }
 
@@ -143,7 +143,7 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
     /**
      * Check if the IGNORE folder exists, therefore, assume that the session is MD.
      */
-    const mdDir = config["userDataDir"] ||  `${config?.inDocker ? '/sessions' : config?.sessionDataPath || '.' }/_IGNORE_${config?.sessionId || 'session'}`
+    const mdDir = config["userDataDir"] ||  `${config?.sessionDataPath || (config?.inDocker ? '/sessions' : config?.sessionDataPath || '.') }/_IGNORE_${config?.sessionId || 'session'}`
     if(process.env.AUTO_MD && fs.existsSync(mdDir) && !config?.multiDevice) {
       spinner.info(`Multi-Device directory detected. multiDevice set to true.`);
       config.multiDevice = true;
@@ -178,7 +178,7 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
 
     const WA_AUTOMATE_VERSION = `${pkg.version}${notifier?.update && (notifier?.update.latest !== pkg.version) ? ` UPDATE AVAILABLE: ${notifier?.update.latest}` : ''}`;
     
-    await waPage.waitForFunction('window.Debug!=undefined && window.Debug.VERSION!=undefined');
+    await waPage.waitForFunction('window.Debug!=undefined && window.Debug.VERSION!=undefined && require');
     //@ts-ignore
     const WA_VERSION = await waPage.evaluate(() => window.Debug ? window.Debug.VERSION : 'I think you have been TOS_BLOCKed')
     const canInjectEarly = await earlyInjectionCheck(waPage as Page)
@@ -203,6 +203,16 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
      // eslint-disable-next-line @typescript-eslint/no-unused-vars
      spinner.succeed('Use this easy pre-filled link to report an issue: ' + generateGHIssueLink(config,debugInfo));
      spinner.info(`Time to injection: ${(now() - browserLaunchedTs).toFixed(0)     }ms`);
+     /**
+      * Atempt to avoid invariant violations
+      */
+     const invariantAviodanceTs = now();
+    await Promise.race([
+    (waPage as Page).waitForFunction(`(()=>{return require && require("__debug").modulesMap["WAWebCollections"] ? true : false})()`, {timeout: 10000}).catch(()=>{}), //modules are loaded
+    (waPage as Page).waitForFunction(`[...document.getElementsByTagName('div')].filter(x=>x.dataset && x.dataset.testid)[0]?.dataset?.testid === 'qrcode'`, {timeout: 10000}).catch(()=>{}), //qr code is loaded
+    (waPage as Page).waitForFunction(`document.getElementsByTagName('circle').length===1`, {timeout: 10000}).catch(()=>{}) //qr spinner is present
+    ])
+    spinner.info(`Invariant Violation Avoidance: ${(now() - invariantAviodanceTs).toFixed(0)     }ms`);
     if (canInjectEarly) {
       if(attemptingReauth) await waPage.evaluate(`window.Store = {"Msg": true}`)
       spinner.start('Injecting api');
@@ -225,7 +235,7 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
       //kill the browser
       spinner.fail("Session data most likely expired due to manual host account logout. Please re-authenticate this session.")
       await kill(waPage)
-      if(config?.deleteSessionDataOnLogout) deleteSessionData(config)
+      if(config?.deleteSessionDataOnLogout) await deleteSessionData(config)
       if(config?.throwOnExpiredSessionData) {
         throw new SessionExpiredError();
       } else
@@ -246,7 +256,9 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
      },debugInfo,spinner)
 
     if (authenticated == 'timeout') {
-      const outOfReach = await Promise.race([phoneIsOutOfReach(waPage), timeout(20 * 1000)]);
+      const oorProms : Promise<boolean | string>[] = [phoneIsOutOfReach(waPage)];
+      if(config?.oorTimeout!== 0) oorProms.push(timeout((config?.oorTimeout || 60) * 1000))
+      const outOfReach : string | boolean = await Promise.race(oorProms) as any
       spinner.emit(outOfReach && outOfReach !== 'timeout' ? 'appOffline' : 'authTimeout');
       spinner.fail(outOfReach && outOfReach !== 'timeout' ? 'Authentication timed out. Please open the app on the phone. Shutting down' : 'Authentication timed out. Shutting down. Consider increasing authTimeout config variable: https://open-wa.github.io/wa-automate-nodejs/interfaces/configobject.html#authtimeout');
       await kill(waPage);
@@ -259,7 +271,9 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
     } else {
       spinner.info('Authenticate to continue');
       const race = [];
-      race.push(qrManager.smartQr(waPage, config, spinner))
+      if(config?.linkCode) {
+        race.push(qrManager.linkCode(waPage, config, spinner))
+      } else race.push(qrManager.smartQr(waPage, config, spinner))
       if (config?.qrTimeout!==0) {
         let to = (config?.qrTimeout || 60) * 1000
         if(config?.multiDevice) to = to * 2
@@ -283,11 +297,15 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
       spinner.emit('successfulScan');
       spinner.succeed();
     }
+    if(config.logInternalEvents) await waPage.evaluate("debugEvents=true")
+    await waPage.evaluate("window.critlis=true")
+    const tI = await timePromise(()=> injectInternalEventHandler(waPage))
+    log.info(`Injected internal event handler: ${tI} ms`)
     if(attemptingReauth) {
       await waPage.evaluate("window.Store = undefined")
       if(config?.waitForRipeSession) {
-        spinner.start("Waiting for ripe session...")
-        if(await waitForRipeSession(waPage)) spinner.succeed("Session ready for injection");
+        spinner.start("Waiting for ripe session....")
+        if(await waitForRipeSession(waPage, config?.waitForRipeSessionTimeout)) spinner.succeed("Session ready for injection");
         else spinner.fail("You may experience issues in headless mode. Continuing...")
       }
     }
@@ -299,7 +317,10 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
     if (canInjectEarly) {
       //check if page is valid after 5 seconds
       spinner.start('Checking if session is valid');
-      if(config?.safeMode) await timeout(5000);
+      if(config?.safeMode) {
+        await timeout(5000);
+        await injectApi(waPage, spinner, true)
+      }
     }
     //@ts-ignore
     const VALID_SESSION = await waPage.waitForFunction(`window.Store && window.Store.Msg ? true : false`,{ timeout: 9000, polling: 200 }).catch(async e=>{
@@ -389,7 +410,7 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
       spinner.emit(debugInfo, "DebugInfo");
       //@ts-ignore
       const metrics = await waPage.evaluate(({config}) => WAPI.launchMetrics(config), {config});
-      const purgedMessage = metrics?.purged ? Object.entries(metrics.purged).filter(([,e])=>e>0).map(([k,e])=>`${e} ${k}`).join(" and ") : "";
+      const purgedMessage = metrics?.purged ? Object.entries(metrics.purged).filter(([,e])=>Number(e)>0).map(([k,e])=>`${e} ${k}`).join(" and ") : "";
       if(metrics.isMd && !config?.multiDevice) spinner.info("!!!Please set multiDevice: true in the config or use the --mutli-Device flag!!!")
       spinner.succeed(`Client loaded for ${metrics.isBiz ? "business" : "normal"} account ${metrics.isMd && "[MD] " || ''}with ${metrics.contacts} contacts, ${metrics.chats} chats & ${metrics.messages} messages ${purgedMessage ? `+ purged ${purgedMessage} ` : ``}in ${LAUNCH_TIME_MS/1000}s`);
       debugInfo.ACC_TYPE = metrics.isBiz ? "BUSINESS" : "PERSONAL";
@@ -417,6 +438,7 @@ export async function create(config: AdvancedConfig | ConfigObject = {}): Promis
       console.log(boxen("Use the link below to easily report issues:👇👇👇", {padding: 1, borderColor: 'red'}))
       spinner.succeed(issueLink)
       spinner.succeed(`🚀 @OPEN-WA ready for account: ${me.user.slice(-4)}`);
+      if(!debugInfo.CLI && !config.licenseKey) spinner.succeed(`Use this link to get a license: ${await client.getLicenseLink()}`);
       spinner.emit('SUCCESS');
       spinner.remove();
       return client;

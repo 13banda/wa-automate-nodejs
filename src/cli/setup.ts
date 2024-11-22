@@ -85,7 +85,7 @@ export const helptext = commandLineUsage([{
     ]
 },
 {
-    content: `Please check here for more information on some of the above mentioned parameters: {underline https://docs.openwa.dev/interfaces/api_model_config.configobject}`
+    content: `Please check here for more information on some of the above mentioned parameters: {underline https://docs.openwa.dev/docs/reference/api/model/config/interfaces/ConfigObject}`
 },
 {
     content: 'Project home: {underline https://github.com/open-wa/wa-automate-nodejs}'
@@ -126,7 +126,7 @@ export const configFile: (config ?: string) => Promise<JsonObject> = async (conf
                 await attempt(`${isDir && conf as string}/cli.config.json`, true);
                 await attempt(`${isDir && conf as string}/cli.config.js`, true);
                 await backup();
-            } else attempt(conf as string)
+            } else await attempt(conf as string)
             if (!confFile) console.error(`Unable to read config file json: ${conf}`)
         }
     } else {
@@ -168,6 +168,7 @@ export const cli: () => Promise<{
             _config.logging = setupLogging(_config?.logging, `easy-api-${_config?.sessionId || 'session'}`)
             loggingSetup = true;
         }
+        if(_config.verbose) _config.disableSpins = true;
     }
 
     _setupLogging(_cli.flags)

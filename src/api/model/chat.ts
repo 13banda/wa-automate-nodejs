@@ -85,6 +85,10 @@ export interface BaseChat {
    * @deprecated This is unreliable. Use the method [`getLastSeen`](https://open-wa.github.io/wa-automate-nodejs/classes/client.html#getlastseen) instead.
    */
   lastSeen?: any;
+  /**
+   * URL of the chat picture if available
+   */
+  pic?:string;
 }
 
 export interface SingleChat extends BaseChat {
@@ -107,6 +111,10 @@ export interface GroupChat extends BaseChat {
     * Whether the chat is a group chat
     */
    isGroup: true;
+   /**
+    * The type of the group
+    */
+   groupType: 'DEFAULT' | 'COMMUNITY' | 'LINKED_ANNOUNCEMENT_GROUP' | 'LINKED_GENERAL_GROUP' | 'LINKED_SUBGROUP'
 }
 
 export type Chat =  SingleChat | GroupChat;

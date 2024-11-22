@@ -123,8 +123,9 @@ export async function getLicense(config: ConfigObject, me: {
       //run the funciton to get the key
       config.licenseKey = await (config.licenseKey as (sessionId: string, number: string) => Promise<string>)(config.sessionId, me._serialized)
     }
-    if(typeof config.licenseKey === "object") {
+    if(config.licenseKey && typeof config.licenseKey === "object") {
       //attempt to get the key from the object
+      //@ts-ignore
       config.licenseKey = config.licenseKey[me._serialized] || config.licenseKey[config.sessionId]
     }
     //asume by now the key is a string
@@ -143,9 +144,10 @@ export async function getLicense(config: ConfigObject, me: {
 
 export async function earlyInjectionCheck(page: Page): Promise<(page: Page) => boolean> {
   //@ts-ignore
-  await page.waitForFunction(()=>Object.entries(window).filter(([, o]) => o && o.push && (o.push != [].push))[0] ? true : false, { timeout: 10, polling: 500 }).catch(()=>{})
+  await page.waitForFunction(`require("__debug").modulesMap["WAWebCollections"] ? true : false`, { timeout: 10, polling: 500 }).catch(()=>{})
   //@ts-ignore
-  return await page.evaluate(() => { if (window.webpackChunkwhatsapp_web_client) { window.webpackChunkbuild = window.webpackChunkwhatsapp_web_client; } else { (function () { const f = Object.entries(window).filter(([, o]) => o && o.push && (o.push != [].push)); if (f[0]) { window.webpackChunkbuild = window[f[0][0]]; } })(); } return (typeof window.webpackChunkbuild !== "undefined"); });
+  // return await page.evaluate(() => { if (window.webpackChunkwhatsapp_web_client) { window.webpackChunkbuild = window.webpackChunkwhatsapp_web_client; } else { (function () { const f = Object.entries(window).filter(([, o]) => o && o.push && (o.push != [].push)); if (f[0]) { window.webpackChunkbuild = window[f[0][0]]; } })(); } return (typeof window.webpackChunkbuild !== "undefined"); });
+  return true;
 }
 
 export async function getAndInjectLicense(page: Page, config: ConfigObject, me: {

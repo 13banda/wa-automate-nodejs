@@ -1,4 +1,4 @@
-import { ChatId, ContactId, MessageId } from "./aliases";
+import { ChatId, ContactId, MessageId, GroupChatId } from "./aliases";
 import { Button, Row, Section } from "./button";
 import { Chat } from "./chat";
 import { Contact } from "./contact";
@@ -32,6 +32,20 @@ export interface Message {
    * The body of the message. If the message type is `chat` , `body` will be the text of the chat. If the message type is some sort of media, then this body will be the thumbnail of the media.
    */
   body: string;
+  /**
+   * The device ID of the device that sent the message. This is only present if the message was sent from host account-linked session. This is useful for determining if a message was sent from a different mobile device (note that whenever a device) or a desktop session.
+   * 
+   * Note: This will emit a number for the current controlled session also but the only way to know if the number represents the current session is by checking `local` (it will be `true` if the message was sent from the current session).
+   * 
+   * If the device ID is `0` then the message was sent from the "root" host account device.
+   * 
+   * This might be undefined for incoming messages.
+   */
+  device: number;
+  /**
+   * If the message was sent from this controlled session this will be `true`. This is useful for determining if a message was sent from a different mobile device (note that whenever a device) or a desktop session.
+   */
+  local: boolean;
   /**
    * a convenient way to get the main text content from a message.
    */
@@ -71,7 +85,8 @@ export interface Message {
    */
   to: ChatId;
   /**
-   * Indicates whether the message was sent by the host account
+   * Indicates whether the message is coming into the session or going out of the session. You can have a message sent by the host account show as `in` when the message was sent from another
+   * session or from the host account device itself.
    */
   self: "in" | "out";
   /**
@@ -149,11 +164,39 @@ export interface Message {
    */
   clientUrl: string;
   deprecatedMms3Url: string;
+  /**
+   * If this message is quoting (replying to) another message
+   */
+  isQuotedMsgAvailable: boolean;
   quotedMsg ?: Message;
   quotedMsgObj ?: Message;
+  /**
+   * When a user requests to join a group wihtin a community the request is received by the host as a message. This boolean will allow you to easily determine if the incoming message is a request to join a group.
+   * 
+   * If this is `true` then you need to determine within your own code whether or not to accept the user to the group which is indicated with `quotedRemoteJid` using `addParticipant`.
+   */
+  isGroupJoinRequest ?: GroupChatId;
+  /**
+   * The ID of the message sender
+   */
+  senderId ?: string,
+  /**
+   * The ID of the quoted group. Usually present when a user is requesting to join a group.
+   */
+  quotedRemoteJid ?: string,
+  /**
+   * The parent group ID (community ID - communities are just groups made up of other groups) of the group represented by `quotedRemoteJid`
+   */
+  quotedParentGroupJid ?: GroupChatId,
   mediaData: unknown;
   shareDuration: number;
   isAnimated: boolean;
+  ctwaContext ?: {
+    sourceUrl: string,
+    thumbnail: string | null,
+    mediaType: number,
+    isSuspiciousLink: boolean | null
+  },
   /**
    * Is the message a "view once" message
    */
@@ -183,6 +226,133 @@ export interface Message {
       "description": string,
       "buttonText":  string,
     }
+    /**
+     * The options of a poll
+     */
+    pollOptions ?: PollOption[],
+    /**
+     * The reaction of the host account to this message
+     */
+    reactionByMe ?: ReactionSender,  
+    reactions: {
+      aggregateEmoji: string,
+      /**
+       * The senders of this reaction
+       */
+      senders: ReactionSender[]
+      /**
+       * If the host account has reacted to this message with this reaction
+       */
+      hasReactionByMe: boolean
+      /**
+       * The message ID of the reaction itself
+       */
+      id: string
+    }[]
+}
+
+export interface ReactionSender {
+    /**
+     * The ID of the message being reacted to
+     */
+    parentMsgKey: MessageId,
+    /**
+     * The contact ID of the sender of the reaction
+     */
+    senderUserJid: ContactId,
+    /**
+     * The message ID of the reaction itself
+     */
+    msgKey: MessageId,
+    /**
+     * The text of the reaction
+     */
+    reactionText: string,
+    /**
+     * The timestamp of the reaction
+     */
+    timestamp: number,
+    orphan: number,
+    /**
+     * If the reaction was seen/read
+     */
+    read: boolean,
+    /**
+     * The timestamp of the reaction
+     */
+    t?: number,
+    /**
+     * The message ID of the reaction itself
+     */
+    id: MessageId,
+    isSendFailure: boolean,
+    ack?: number
+  }
+
+export interface PollOption {
+  name: string,
+  localId: number
+}
+
+export interface PollData {
+  /**
+   * The total amount of votes recorded so far
+   */
+  totalVotes: number,
+  /**
+   * The poll options and their respective count of votes.
+   */
+  pollOptions: (PollOption & { count: number })[],
+  /**
+   * An arrray of vote objects
+   */
+  votes: PollVote[]
+  /**
+   * The message object of the poll
+   */
+  pollMessage: Message
+}
+
+export interface PollVote {
+  ack: number,
+  /**
+   * The message ID of this vote. For some reason this is different from the msgKey and includes exclamaition marks.
+   */
+  id: string,
+  /**
+   * The message key of this vote
+   */
+  msgKey: string,
+  /**
+   * The Message ID of the original Poll message
+   */
+  parentMsgKey: string,
+  /**
+   * The original poll options available on the poll
+   */
+  pollOptions: PollOption[],
+  /**
+   * The selected option IDs of the voter
+   */
+  selectedOptionLocalIds: number[],
+  /**
+   * The selected option values by this voter
+   */
+  selectedOptionValues: string[],
+  /**
+   * The contact ID of the voter
+   */
+  sender: ContactId,
+  /**
+   * The contact object of the voter
+   */
+  senderObj: Contact,
+  /**
+   * Timestamp of the vote
+   */
+  senderTimestampMs: number,
+  stale: boolean
+
 }
 
 export interface QuoteMap {

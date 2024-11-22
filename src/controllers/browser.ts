@@ -1,9 +1,10 @@
 import * as path from 'path';
-import * as fs from 'fs';
+import * as fs from 'fs/promises';
+import * as readline from 'readline';
 import ON_DEATH from 'death';
 // import puppeteer from 'puppeteer-extra';
 import { puppeteerConfig, useragent, width, height} from '../config/puppeteer.config';
-import { Browser, CDPSession, Page } from 'puppeteer';
+import { Browser, Page, executablePath } from 'puppeteer';
 import { Spin, EvEmitter } from './events';
 import { ConfigObject } from '../api/model';
 import { FileNotFoundError, getTextFile } from 'pico-s3';
@@ -11,7 +12,7 @@ import { FileNotFoundError, getTextFile } from 'pico-s3';
 const puppeteer = require('puppeteer-extra')
 import terminate from 'terminate/promise';
 import { log } from '../logging/logging';
-import { now, processSendData, timeout, timePromise } from '../utils/tools';
+import { now, pathExists, processSendData, timeout, timePromise } from '../utils/tools';
 import { QRManager } from './auth';
 import { scriptLoader } from './script_preloader';
 import { earlyInjectionCheck } from './patch_manager';
@@ -19,7 +20,7 @@ import { injectProgObserver } from './init_patch';
 
 let browser,
 wapiInjected = false,
-dumbCache = undefined,
+pageCache = undefined,
 wapiAttempts = 1;
 
 export let BROWSER_START_TS = 0;
@@ -39,6 +40,22 @@ export async function initPage(sessionId?: string, config?:ConfigObject, qrManag
     browser = await initBrowser(sessionId,config, spinner);
     spinner?.info(`Browser launched: ${(now() - startBrowser).toFixed(0)}ms`)
     waPage = await getWAPage(browser);
+    if(process.stdin.setRawMode && typeof process.stdin.setRawMode == "function") {
+      readline.emitKeypressEvents(process.stdin);
+      process.stdin.setRawMode(true);
+      console.log('Press "s" to take a screenshot. Press "Ctrl+C" to quit.');
+      process.stdin.on('keypress', async (str: string, key: readline.Key) => {
+        if (key.name === 's') {
+          const path = `./screenshot_${config.sessionId || "session"}_${Date.now()}.png`;
+          console.log(`Taking screenshot: ${path} ...`);
+          await waPage.screenshot({path})
+        }
+      
+        if (key.ctrl && key.name === 'c') {
+          process.exit();
+        }
+      });
+    } else console.log("Unable to set raw mode on stdin. Keypress events will not be emitted. You cannot take a screenshot by pressing 's' during launch.")
   }
   //@ts-ignore
   await (typeof waPage._client === 'function' && waPage._client() || waPage._client).send('Network.setBypassServiceWorker', {bypass: true})
@@ -46,13 +63,15 @@ export async function initPage(sessionId?: string, config?:ConfigObject, qrManag
   waPage.on("framenavigated", async frame => {
     try {
       const frameNavPromises = [];
-      const content = await frame.content()
-      const webpPackKey = (((content.match(/self.(?:.*)=self.*\|\|\[\]/g) || [])[0] || "").match(/self.*\w?=/g) || [""])[0].replace("=","").replace("self.","") || false
-      log.info(`FRAME NAV, ${frame.url()}, ${webpPackKey}`)
-      if(webpPackKey) {
-        frameNavPromises.push(injectApi(waPage, spinner, true))
-        frameNavPromises.push(qrManager.waitFirstQr(waPage, config, spinner))
-      }
+      // const content = await frame.content() //not using content right now so save some ms by commenting out
+      log.info(`FRAME NAV DETECTED, ${frame.url()}, Reinjecting APIs...`)
+        // there's no more webpack so reinject anyways
+        const hasWapi = await waPage.evaluate("window.WAPI ? true : false")
+        if(!hasWapi) {
+          log.info("FN: WAPI missing. Reinjecting APIs...")
+          frameNavPromises.push(injectApi(waPage, spinner, true))
+          frameNavPromises.push(qrManager.waitFirstQr(waPage, config, spinner))
+        } else log.info("FN: WAPI intact. Skipping reinjection...")
       if(frame.url().includes('post_logout=1')) {
           console.log("Session most likely logged out")
       }
@@ -102,31 +121,49 @@ export async function initPage(sessionId?: string, config?:ConfigObject, qrManag
   if(proxyAddr) {
     proxy = (await import('smashah-puppeteer-page-proxy')).default
   }
+  /**
+   * Detect a locally cached page
+   */
+  if(process.env.WA_LOCAL_PAGE_CACHE) {
+    const localPageCacheExists = await pathExists(process.env.WA_LOCAL_PAGE_CACHE, true)
+    log.info(`Local page cache env var set: ${process.env.WA_LOCAL_PAGE_CACHE} ${localPageCacheExists}`)
+    if(localPageCacheExists) {
+      log.info(`Local page cache file exists. Loading...`)
+      pageCache = await fs.readFile(process.env.WA_LOCAL_PAGE_CACHE, "utf8");
+    }
+  }
   if(interceptAuthentication || proxyAddr || blockCrashLogs || true){
       await waPage.setRequestInterception(true);  
       waPage.on('response', async response => {
         try {
           if(response.request().url() == "https://web.whatsapp.com/") {
             const t = await response.text()
-            if(t.includes(`class="no-js"`) && t.includes(`self.`) && !dumbCache) {
+            if(t.includes(`class="no-js"`) && t.includes(`self.`) && !pageCache) {
               //this is a valid response, save it for later
-              dumbCache = t;
+              pageCache = t;
               log.info("saving valid page to dumb cache")
+              /**
+               * Save locally
+               */
+              if(process.env.WA_LOCAL_PAGE_CACHE) {
+                log.info(`Writing page cache to local file: ${process.env.WA_LOCAL_PAGE_CACHE}`)
+                await fs.writeFile(process.env.WA_LOCAL_PAGE_CACHE, pageCache);
+              }
             }
           }
         } catch (error) {
-          log.error("dumb cache error", error)
+          log.error("page cache error", error)
         }
       })
       const authCompleteEv = new EvEmitter(sessionId, 'AUTH');
       waPage.on('request', async request => {
         //local refresh cache:
-        if(request.url()==="https://web.whatsapp.com/" && dumbCache) {
-          //if the dumbCache isn't set and this response includes 
-          log.info("reviving page from dumb cache")
+        if(request.url()==="https://web.whatsapp.com/" && pageCache) {
+          //if the pageCache isn't set and this response includes 
+          log.info("reviving page from page cache")
             return await request.respond({
               status: 200,
-              body: dumbCache
+              body: pageCache
             });
         }
         if (
@@ -138,7 +175,7 @@ export async function initPage(sessionId?: string, config?:ConfigObject, qrManag
           await waPage.evaluate('window.WA_AUTHENTICATED=true;');
           quickAuthed = true;
         }
-      if (request.url().includes('https://crashlogs.whatsapp.net/') && blockCrashLogs){
+      if (["https://dit.whatsapp.net/deidentified_telemetry", "https://crashlogs.whatsapp.net/"].find(u=>request.url().includes(u)) && blockCrashLogs){
         request.abort();
       }
       else if (proxyAddr && !config?.useNativeProxy) {
@@ -155,7 +192,7 @@ export async function initPage(sessionId?: string, config?:ConfigObject, qrManag
    * AUTH
    */
   spinner?.info('Loading session data')
-  let sessionjson : any = getSessionDataFromFile(sessionId, config, spinner)
+  let sessionjson : any = await getSessionDataFromFile(sessionId, config, spinner)
   if(!sessionjson && sessionjson !== "" && config.sessionDataBucketAuth) {
     try {
       spinner?.info('Unable to find session data file locally, attempting to find session data in cloud storage..')
@@ -213,6 +250,11 @@ export async function initPage(sessionId?: string, config?:ConfigObject, qrManag
       spinner?.info(`${(value || value === 0) && `${value}%:\t`} ${text}`)
       spinner?.emit({value,text},"internal_launch_progress")
     })
+    await waPage.exposeFunction("CriticalInternalMessage", async ({value, text}) => {
+      spinner?.info(`${text}`)
+      spinner?.emit({value,text},"critical_internal_message");
+      if(value==="TEMP_BAN" && !(config.killProcessOnBan === false)) await kill(waPage, undefined, true, undefined, "TEMP_BAN")
+    })
     await injectProgObserver(waPage)
     if(webRes==null) {
       spinner?.info(`Page loaded but something may have gone wrong: ${WEB_END_TS - WEB_START_TS}ms`)
@@ -227,16 +269,16 @@ export async function initPage(sessionId?: string, config?:ConfigObject, qrManag
   return waPage;
 }
 
-const getSessionDataFromFile = (sessionId: string, config: ConfigObject, spinner ?: Spin) => {
+const getSessionDataFromFile = async (sessionId: string, config: ConfigObject, spinner ?: Spin) => {
   if(config?.sessionData == "NUKE") return '' 
   //check if [session].json exists in __dirname
-  const sessionjsonpath = getSessionDataFilePath(sessionId,config)
+  const sessionjsonpath = await getSessionDataFilePath(sessionId,config)
   let sessionjson = '';
   const sd = process.env[`${sessionId.toUpperCase()}_DATA_JSON`] ? JSON.parse(process.env[`${sessionId.toUpperCase()}_DATA_JSON`]) : config?.sessionData;
   sessionjson = (typeof sd === 'string' && sd !== "") ? JSON.parse(Buffer.from(sd, 'base64').toString('ascii')) : sd;
-  if (sessionjsonpath && typeof sessionjsonpath == 'string' && fs.existsSync(sessionjsonpath)) {
+  if (sessionjsonpath && typeof sessionjsonpath == 'string' && await pathExists(sessionjsonpath)) {
     spinner.succeed(`Found session data file: ${sessionjsonpath}`)
-    const s = fs.readFileSync(sessionjsonpath, "utf8");
+    const s = await fs.readFile(sessionjsonpath, "utf8");
     try {
       sessionjson = JSON.parse(s);
     } catch (error) {
@@ -256,48 +298,52 @@ const getSessionDataFromFile = (sessionId: string, config: ConfigObject, spinner
   return sessionjson;
 }
 
-export const deleteSessionData = (config: ConfigObject) : boolean => {
-  const sessionjsonpath = getSessionDataFilePath(config?.sessionId || 'session', config)
-  if(typeof sessionjsonpath == 'string' && fs.existsSync(sessionjsonpath)) {
+export const deleteSessionData = async (config: ConfigObject) : Promise<boolean> => {
+  const sessionjsonpath = await getSessionDataFilePath(config?.sessionId || 'session', config)
+  if(typeof sessionjsonpath == 'string' && await pathExists(sessionjsonpath)) {
     const l = `logout detected, deleting session data file: ${sessionjsonpath}`
     console.log(l)
     log.info(l)
-    fs.unlinkSync(sessionjsonpath);
+    await fs.unlink(sessionjsonpath);
   }
-  const mdDir = config['userDataDir'];
-  if(mdDir) {
+  const mdDir = await pathExists(config['userDataDir']);
+  if(config['userDataDir'] && mdDir) {
     log.info(`Deleting MD session directory: ${mdDir}`)
-    fs.rmdirSync(mdDir, {recursive: true})
+    await fs.rm(mdDir, { force: true, recursive: true})
+    log.info(`MD directory ${mdDir} deleted: ${!(await pathExists(mdDir, true))}`)
   }
   return true;
 }
 
-export const invalidateSesssionData = (config: ConfigObject) : boolean => {
-  const sessionjsonpath = getSessionDataFilePath(config?.sessionId || 'session', config)
-  if(typeof sessionjsonpath == 'string' && fs.existsSync(sessionjsonpath)) {
+export const invalidateSesssionData = async (config: ConfigObject) : Promise<boolean> => {
+  const sessionjsonpath = await getSessionDataFilePath(config?.sessionId || 'session', config)
+  if(typeof sessionjsonpath == 'string' && await pathExists(sessionjsonpath)) {
     const l = `logout detected, invalidating session data file: ${sessionjsonpath}`
     console.log(l)
     log.info(l)
-    fs.writeFile(sessionjsonpath, "LOGGED OUT", (err) => {
-      if (err) { console.error(err); return; }
-    });
+    fs.writeFile(sessionjsonpath, "LOGGED OUT");
   }
   return true;
 }
 
-export const getSessionDataFilePath = (sessionId: string, config: ConfigObject) : string | false => {
+export const getSessionDataFilePath = async (sessionId: string, config: ConfigObject) : Promise<string | false> => {
   const p = require?.main?.path || process?.mainModule?.path;
   const sessionjsonpath = (config?.sessionDataPath && config?.sessionDataPath.includes('.data.json')) ? path.join(path.resolve(process.cwd(),config?.sessionDataPath || '')) : path.join(path.resolve(process.cwd(),config?.sessionDataPath || ''), `${sessionId || 'session'}.data.json`);
   const altSessionJsonPath = p ? (config?.sessionDataPath && config?.sessionDataPath.includes('.data.json')) ? path.join(path.resolve(p,config?.sessionDataPath || '')) : path.join(path.resolve(p,config?.sessionDataPath || ''), `${sessionId || 'session'}.data.json`) : false;
-  if(fs.existsSync(sessionjsonpath)){
+  if(pathExists(sessionjsonpath)){
     return sessionjsonpath
-  } else if(p && altSessionJsonPath && fs.existsSync(altSessionJsonPath)){
+  } else if(p && altSessionJsonPath && await pathExists(altSessionJsonPath)){
     return altSessionJsonPath
   }
   return false
 }
 
-export const addScript = async (page: Page, js : string) : Promise<unknown> => page.evaluate(await scriptLoader.getScript(js)).catch(e => log.error(`Injection error: ${js}`, e))
+export const addScript = async (page: Page, js : string, asScriptTag ?: boolean) : Promise<unknown> => {
+  const content = await scriptLoader.getScript(js)
+  const injectResult = await ( asScriptTag ? page.addScriptTag({content, type: 'text/javascript'}) :  page.evaluate(content).catch(e => log.error(`Injection error: ${js}`, e)))
+  log.info(`Injection Result of ${js}: ${injectResult}`)
+  return injectResult
+}
 // (page: Page, js : string) : Promise<unknown> => page.addScriptTag({
 //   path: require.resolve(path.join(__dirname, '../lib', js))
 // })
@@ -307,17 +353,22 @@ export async function injectPreApiScripts(page: Page, spinner ?: Spin) : Promise
   if(await page.evaluate("!['jsSHA','axios', 'QRCode', 'Base64', 'objectHash'].find(x=>!window[x])")) return;
   const t1 = await timePromise(() => Promise.all(
    [
-     'jsSha.min.js',
+    //  'jsSha.min.js', //only needed in getFileHash which is not used anymore
      'qr.min.js',
-     'base64.js',
+    //  'base64.js', //only needed in base64ImageToFile and atob is a fallback
      'hash.js'
-   ].map(js=>addScript(page,js))
+   ].map(js=>addScript(page, js))
    ))
    spinner?.info(`Base inject: ${t1}ms`);
    return page;
 }
 
 export async function injectWapi(page: Page, spinner ?: Spin, force = false) : Promise<Page> {
+
+  console.log(`Waiting for require...`)
+  const tR = await timePromise(()=>page.waitForFunction('window.require || false', {timeout: 5000, polling: 50}).catch(()=>{console.log("No require found in frame")}))
+  console.log(`Found require: ${tR}ms`)
+
   const bruteInjectionAttempts = 1;
   await earlyInjectionCheck(page)
   const check = `window.WAPI && window.Store ? true : false`;
@@ -389,26 +440,44 @@ async function initBrowser(sessionId?: string, config:any={}, spinner ?: Spin) {
       browserDownloadSpinner.succeed('Something went wrong while downloading the browser');
     }
   }
-  
+  /**
+   * Explicit fallback due to pptr 19
+   */
+  if(!config.executablePath) config.executablePath = executablePath()
   if(config?.proxyServerCredentials?.address && config?.useNativeProxy) puppeteerConfig.chromiumArgs.push(`--proxy-server=${config.proxyServerCredentials.address}`)
   if(config?.browserWsEndpoint) config.browserWSEndpoint = config.browserWsEndpoint;
   let args = [...puppeteerConfig.chromiumArgs,...(config?.chromiumArgs||[])];
   if(config?.multiDevice) {
     args = args.filter(x=>x!='--incognito')
-    config["userDataDir"] = config["userDataDir"] ||  `${config?.inDocker ? '/sessions' : config?.sessionDataPath || '.' }/_IGNORE_${config?.sessionId || 'session'}`
+    config["userDataDir"] = config["userDataDir"] ||  `${config?.sessionDataPath || (config?.inDocker ? '/sessions' : config?.sessionDataPath || '.') }/_IGNORE_${config?.sessionId || 'session'}`
     spinner?.info('MD Enabled, turning off incognito mode.')
     spinner?.info(`Data dir: ${config["userDataDir"]}`)
   }
   if(config?.corsFix) args.push('--disable-web-security');
-  if(config["userDataDir"] && !fs.existsSync(config["userDataDir"])) {
+  if(config["userDataDir"] && !(await pathExists(config["userDataDir"]))) {
     spinner?.info(`Data dir doesnt exist, creating...: ${config["userDataDir"]}`)
-    fs.mkdirSync(config["userDataDir"], {recursive: true});
+    fs.mkdir(config["userDataDir"], {recursive: true});
   }
   const browser = (config?.browserWSEndpoint) ? await puppeteer.connect({...config}): await puppeteer.launch({
-    headless: true,
+    headless: "new",
     args,
     ...config,
     devtools: false
+  }).catch(e=>{
+    spinner?.fail('Error launching browser')
+    console.error(e)
+    if(e.message.includes("ENOENT")) {
+      config.executablePath = executablePath()
+      console.log("Falling back to chromium:", config.executablePath)
+      return puppeteer.launch({
+        headless: "new",
+        args,
+        ...config,
+        devtools: false
+      })
+    }
+    spinner?.fail(e.message)
+    throw e;
   });
   BROWSER_START_TS = Date.now();
   //devtools

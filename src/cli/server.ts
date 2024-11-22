@@ -14,9 +14,16 @@ import { convert } from 'xmlbuilder2';
 import { chatwootMiddleware, chatwoot_webhook_check_event_name } from './integrations/chatwoot';
 import {IpFilter, IpDeniedError} from'express-ipfilter'
 import helmet from "helmet";
+import { tunnel } from "cloudflared";
+
+import { spawn } from 'child_process';
+import { createCustomDomainTunnel } from './integrations/cloudflare';
 
 export const app = express();
 export let server = http.createServer(app);
+
+// will be used to clean up cloudflared tunnel
+let stop;
 
 const trimChatId = (chatId : ChatId) => chatId.replace("@c.us","").replace("@g.us","")
 
@@ -96,9 +103,9 @@ export const setUpExpressApp : () => void = () => {
     setupMetaMiddleware();
 }
 
-export const enableCORSRequests : () => void = async () => {
+export const enableCORSRequests : (cliConfig : cliFlags) => void = async (cliConfig : cliFlags) => {
     const {default : cors} = await import('cors');
-    app.use(cors());
+    app.use(cors(typeof cliConfig.cors === 'object' && cliConfig.cors));
 }
 
 export const setupAuthenticationLayer : (cliConfig : cliFlags) => void = (cliConfig : cliFlags) => {
@@ -220,17 +227,83 @@ const setupMetaMiddleware = () => {
     })
 }
 
+export const setupMetaProcessMiddleware = (client : Client, cliConfig) => {
+    /**
+     * Kill the client. End the process.
+     */
+    let closing = false;
+    const nuke = async (req, res, restart) => {
+        res.set("Connection", "close");
+        res.send(closing ? `Already closing! Stop asking!!` : 'Closing after connections closed. Waiting max 5 seconds');
+        res.end()
+        res.connection.end();
+        res.connection.destroy();
+        if(closing) return;
+        closing = true;
+        await client.kill("API_KILL");
+        log.info("Waiting for maximum ")
+        if(stop && typeof stop === 'function') stop()
+        await Promise.race([
+            new Promise((resolve)=>server.close(() => {
+                console.log('Server closed');
+                resolve(true);
+            })),
+            new Promise(resolve => setTimeout(resolve, 5000, 'timeout'))
+        ]);
+        if(process.env.pm_id && process.env.PM2_USAGE) {
+            const cmd = `pm2 ${restart ? 'restart' : 'stop'} ${process.env.pm_id}`;
+            log.info(`PM2 DETECTED, RUNNING COMMAND: ${cmd}`)
+            const cmda = cmd.split(' ')
+            spawn(cmda[0], cmda.splice(1), { stdio: 'inherit' })
+        } else {
+            if(restart) setTimeout(function () {
+                process.on("exit", function () {
+                    spawn(process.argv.shift(), process.argv, {
+                        cwd: process.cwd(),
+                        detached : true,
+                        stdio: "inherit"
+                    });
+                });
+                process.exit();
+            }, 5000);
+            else process.exit(restart ? 0 : 10);
+        }
+    }
+    /**
+     * Exit code 10 will prevent pm2 process from auto-restarting
+     */
+    app.post('/meta/process/exit', async (req, res) => {
+        return await nuke(req,res,false)
+    })
+
+    /**
+     * Will only restart if the process is managed by pm2
+     * 
+     * Note: Only works when `--pm2` flag is enabled.
+     */
+    app.post('/meta/process/restart', async (req, res) => {
+        return await nuke(req,res,true)
+    })
+}
 export const getCommands : () => any = () => Object.entries(collections['swagger'].paths).reduce((acc,[key,value])=>{acc[key.replace("/","")]=(value as any)?.post?.requestBody?.content["application/json"]?.example?.args || {};return acc},{})
 
 export const listListeners : () => string[] = () => {
     return Object.keys(SimpleListener).map(eventKey => SimpleListener[eventKey])
 }
 
-
 export const setupMediaMiddleware : () => void = () => {
     app.use("/media", express.static('media'))
 }
 
+export const setupTunnel : (cliConfig, PORT: number) => Promise<string> = async (cliConfig, PORT: number) => {
+    const cfT = cliConfig.cfTunnelHostDomain ? await createCustomDomainTunnel(cliConfig,PORT) : tunnel({ "--url": `localhost:${PORT}` });
+    stop = cfT.stop;
+    const url = await cfT.url;
+    const conns = await Promise.all(cfT.connections);
+    log.info(`Connections Ready! ${JSON.stringify(conns, null, 2)}`)
+    cliConfig.apiHost = cliConfig.tunnel = url;
+    return url;
+}
 
 export const setupTwilioCompatibleWebhook : (cliConfig : cliFlags, client: Client) => void = (cliConfig : cliFlags, client: Client) => {
     const url = cliConfig.twilioWebhook as string
@@ -362,7 +435,13 @@ export const setupBotPressHandler : (cliConfig : cliFlags, client: Client) => vo
 
 export const setupSocketServer : (cliConfig, client : Client) => Promise<void> = async (cliConfig, client : Client) => {
     const { Server } = await import("socket.io");
-    const io = new Server(server);
+    const socketServerOptions = cliConfig.cors ? {
+        cors: typeof cliConfig.cors === 'object' ? cliConfig.cors : {
+              origin: "*",
+              methods: ["GET", "POST"],
+        },
+    } : null
+    const io = socketServerOptions ? new Server(server, socketServerOptions) : new Server(server);
     if (cliConfig.key) {
         io.use((socket, next) => {
             if (socket.handshake.auth["apiKey"] == cliConfig.key) next()

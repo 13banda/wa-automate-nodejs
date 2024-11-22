@@ -13,7 +13,7 @@ let uploadQueue;
 const SCRUB: MessagePreProcessor = async (
   message: Message
 ) => {
-  if (message.deprecatedMms3Url)
+  if (message.deprecatedMms3Url && message.mimetype)
     return {
       ...message,
       content: "",
@@ -24,7 +24,7 @@ const SCRUB: MessagePreProcessor = async (
 
 const BODY_ONLY: MessagePreProcessor =
   async (message: Message) => {
-    if (message.deprecatedMms3Url)
+    if (message.deprecatedMms3Url && message.mimetype)
       return {
         ...message,
         content: "",
@@ -34,7 +34,7 @@ const BODY_ONLY: MessagePreProcessor =
 
 const AUTO_DECRYPT: MessagePreProcessor =
   async (message: Message, client: Client) => {
-    if (message.deprecatedMms3Url)
+    if (message.deprecatedMms3Url && message.mimetype)
       return {
         ...message,
         body: await client.decryptMedia(message),
@@ -42,12 +42,20 @@ const AUTO_DECRYPT: MessagePreProcessor =
     return message;
   };
 
-const AUTO_DECRYPT_SAVE: MessagePreProcessor = async (message: Message, client: Client) => {
-  if (message.deprecatedMms3Url) {
-    const filename = `${message.mId}.${mime.extension(
+const AUTO_DECRYPT_SAVE: MessagePreProcessor = async (message: Message, client: Client, alreadyBeingProcessed ?: boolean) => {
+  if (message.deprecatedMms3Url && message.mimetype) {
+    const filename = `${message.mId}.${mime.getExtension(
       message.mimetype
     )}`;
     const filePath = `media/${filename}`;
+    if(alreadyBeingProcessed) {
+      return {
+        ...message,
+        body: filename,
+        content: "",
+        filePath,
+      };
+    }
     try {
       const mediaData = await client.decryptMedia(message);
       outputFileSync(filePath, Buffer.from(mediaData.split(",")[1], "base64"));
@@ -65,14 +73,14 @@ const AUTO_DECRYPT_SAVE: MessagePreProcessor = async (message: Message, client: 
   return message;
 };
 
-const UPLOAD_CLOUD: MessagePreProcessor = async (message: Message, client: Client) => {
-  if (message?.deprecatedMms3Url) {
+const UPLOAD_CLOUD: MessagePreProcessor = async (message: Message, client: Client, alreadyBeingProcessed ?: boolean) => {
+  if (message?.deprecatedMms3Url && message.mimetype) {
     const {cloudUploadOptions} = client.getConfig();
     if(message.fromMe && (cloudUploadOptions.ignoreHostAccount || process.env.OW_CLOUD_IGNORE_HOST)) return message;
     if(!uploadQueue) {
       uploadQueue = new PQueue({ concurrency: 2, interval: 1000, carryoverConcurrencyCount: true, intervalCap: 2 });
     }
-    const filename = `${message.mId || `${Date.now()}`}.${mime.extension(
+    const filename = `${message.mId || `${Date.now()}`}.${mime.getExtension(
       message.mimetype
     )}`;
     const mediaData = await client.decryptMedia(message);
@@ -86,6 +94,8 @@ const UPLOAD_CLOUD: MessagePreProcessor = async (message: Message, client: Clien
       secretAccessKey: process.env.OW_CLOUD_SECRET_ACCESS_KEY || cloudUploadOptions.secretAccessKey, 
       bucket: process.env.OW_CLOUD_BUCKET || cloudUploadOptions.bucket,
       region: process.env.OW_CLOUD_REGION || cloudUploadOptions.region,
+      public: process.env.OW_CLOUD_PUBLIC && true || cloudUploadOptions.public,
+      headers: cloudUploadOptions.headers,
     }
     const dirStrat = process.env.OW_DIRECTORY || cloudUploadOptions.directory
     if(dirStrat) {
@@ -131,7 +141,7 @@ const UPLOAD_CLOUD: MessagePreProcessor = async (message: Message, client: Clien
     }
 
     const url = getCloudUrl(opts);
-    if(!processedFiles[filename]) {
+    if(!processedFiles[filename] && !alreadyBeingProcessed) {
       processedFiles[filename] = true;
       try {
         await uploadQueue.add(() => upload(opts).catch(()=>{}));
@@ -148,7 +158,15 @@ const UPLOAD_CLOUD: MessagePreProcessor = async (message: Message, client: Clien
   return message;
 };
 
-type MessagePreProcessor = (message: Message, client?: Client) => Promise<Message>
+/**
+ * A function that takes a message and returns a message.
+ * 
+ * @param message The message to be processed
+ * @param client The client that received the message
+ * @param alreadyProcessed Whether the message has already been processed by another preprocessor. (This is useful in cases where you want to mutate the message for both onMessage and onAnyMessage events but only want to do the actual process, like uploading to s3, once.)
+ * @param source The source of the message. This is useful for knowing if the message is from onMessage or onAnyMessage. Only processing one source will prevent duplicate processing.
+ */
+export type MessagePreProcessor = (message: Message, client?: Client, alreadyProcessed ?: boolean, source ?: 'onMessage' | 'onAnyMessage') => Promise<Message>
 
 /**
  * An object that contains all available [[PREPROCESSORS]].
@@ -196,8 +214,13 @@ export enum PREPROCESSORS {
    * 
    * Uploads file to a cloud storage provider (GCP/AWS for now).
    * 
-   * If this preprocessor is set then you have to also set [`cloudUploadOptions`](https://docs.openwa.dev/interfaces/api_model_config.ConfigObject.html#cloudUploadOptions) in the config.
+   * If this preprocessor is set then you have to also set [`cloudUploadOptions`](https://docs.openwa.dev/docs/reference/api/model/config/interfaces/ConfigObject#clouduploadoptions) in the config.
    * 
    */
   UPLOAD_CLOUD = "UPLOAD_CLOUD",
 }
+
+/**
+ * The actual type for [config.messagePreprocessor](/docs/api/interfaces/api_model_config.ConfigObject#messagepreprocessor)
+ */
+export type MPConfigType = PREPROCESSORS | MessagePreProcessor | (PREPROCESSORS | MessagePreProcessor)[]

@@ -112,10 +112,10 @@ exports.run = async () => {
     }));
     const release = await getRelease(changelog, version);
     if (release === undefined) throw new Error('no release found');
-    const browser = await puppeteer.launch({ headless: true });
+    const browser = await puppeteer.launch({ headless: "new", timeout:0  });
     const page = await browser.newPage();
     await page.addScriptTag({
-      url: "https://twemoji.maxcdn.com/v/latest/twemoji.min.js"
+      url: "https://cdn.jsdelivr.net/npm/@twemoji/api@latest/dist/twemoji.min.js"
     });
     await page.setViewport({ width: 800, height: 800, deviceScaleFactor: 2 });
     await page.setContent(html(marked.parse(release.body),packageName,release));

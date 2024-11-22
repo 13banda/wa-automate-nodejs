@@ -1,5 +1,4 @@
 import { AxiosRequestConfig } from 'axios';
-import { PREPROCESSORS } from '../../structures/preProcessors';
 import { ConfigLogTransport } from '../../logging/logging';
 import { Base64 } from "./aliases";
 import { SimpleListener } from './events';
@@ -17,7 +16,10 @@ export enum QRFormat {
 export enum CLOUD_PROVIDERS {
     GCP = "GCP",
     WASABI = "WASABI",
-    AWS = "AWS"
+    AWS = "AWS",
+    CONTABO = "CONTABO",
+    DO = "DO",
+    MINIO = "MINIO"
 }
 
 export enum DIRECTORY_STRATEGY {
@@ -210,6 +212,7 @@ export interface ProxyServerCredentials {
 
 export interface ConfigObject {
     /**
+     * @deprecated
      * The authentication object (as a JSON object or a base64 encoded string) that is required to migrate a session from one instance to another or to just restart an existing instance.
      * This sessionData is provided in a generated JSON file (it's a json file but contains the JSON data as a base64 encoded string) upon QR scan or an event.
      * 
@@ -242,6 +245,15 @@ export interface ConfigObject {
      * Setting the sessionData in the environmental variable will override the sessionData object in the config.
      */
     sessionData?: SessionData | Base64,
+    /**
+     * There is a new way to login to your host account by entering a link code after a confirmation step from the host account device. In order to use this feature you MUST set the host account number as a string or number beforehand as a property of the config object.
+     * 
+     * e.g
+     * ```
+     * linkCode: '1234567890'
+     * ```
+     */
+    linkCode?: string;
     /**
      * ALPHA EXPERIMENTAL FEATURE! DO NOT USE IN PRODUCTION, REQUIRES TESTING.
      * 
@@ -356,6 +368,12 @@ export interface ConfigObject {
      */
     qrTimeout?: number,
     /**
+     * This determines how long the process should wait for a session to load fully before continuing the launch process.
+     * Set this to 0 to wait forever. Default is 5 seconds.
+     * @default 5
+     */
+    waitForRipeSessionTimeout?: number,
+    /**
      * Some features, like video upload, do not work without a chrome instance. Set this to the path of your chrome instance or you can use `useChrome:true` to automatically detect a chrome instance for you. Please note, this overrides `useChrome`.
      */
     executablePath?: string,
@@ -406,6 +424,11 @@ export interface ConfigObject {
     * @default `60`
     */
     authTimeout?: number;
+    /**
+     * phoneIsOutOfReach check timeout
+     * @default `60`
+     */
+    oorTimeout?: number,
     /**
      * Setting this to `true` will kill the whole process when the client is disconnected from the page or if the browser is closed. 
      * @default `false`
@@ -532,6 +555,12 @@ export interface ConfigObject {
      */
     killProcessOnTimeout?: boolean;
     /**
+     * If set to true, the system will kill the whole node process when a "TEMPORARY BAN" is detected. This is useful to prevent hanging processes.
+     * It is `true` by default because it is a very rare event and it is better to kill the process than to leave it hanging.
+     * @default `true`
+     */
+    killProcessOnBan?: boolean;
+    /**
      * Setting this to true will bypass web security. DO NOT DO THIS IF YOU DO NOT HAVE TO. CORS issue may arise when using a proxy.
      * @default `false`
      */
@@ -597,6 +626,10 @@ export interface ConfigObject {
      */
     logDebugInfoAsObject?: boolean;
     /**
+     * This will make the library log all internal wa web events to the console. This is useful for debugging purposes. DO NOT TURN THIS ON UNLESS ASKED TO.
+     */
+    logInternalEvents?: boolean;
+    /**
      * Kill the client when a logout is detected
      * @default `false`
      */
@@ -654,12 +687,12 @@ export interface ConfigObject {
      */
     pQueueDefault?: any
     /**
-     * Set a preprocessor for messages. See [[PREPROCESSORS]] for more info.
+     * Set a preprocessor, or multiple chained preprocessors, for messages. See [MPConfigType](/) for more info.
      * 
      * options: `SCRUB`, `BODY_ONLY`, `AUTO_DECRYPT`, `AUTO_DECRYPT_SAVE`, `UPLOAD_CLOUD`.
      * @default `undefined`
      */
-    messagePreprocessor?: PREPROCESSORS,
+    messagePreprocessor?: any,
     /**
      * Set an array filter to be used with messagePreprocessor to limit which messages are preprocessed.
      * 
@@ -724,6 +757,14 @@ export interface ConfigObject {
          * env: `OW_DIRECTORY`
          */
         directory?: DIRECTORY_STRATEGY | string
+        /**
+         * Setting this to true will make the uploaded file public
+         */
+        public?: boolean
+        /**
+         * Extra headers to add to the upload request
+         */
+        headers?: {[k:string]:string}
     },
     /**
      * What to do when an error is detected on a client method.
